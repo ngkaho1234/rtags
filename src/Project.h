@@ -18,6 +18,8 @@
 
 #include <cstdint>
 #include <mutex>
+#include <leveldb/db.h>
+#include <leveldb/comparator.h>
 
 #include "Diagnostic.h"
 #include "FileMap.h"
@@ -66,6 +68,89 @@ struct DependencyNode
 
 RCT_FLAGS(DependencyNode::Flag);
 
+class projectDBComparator : public leveldb::Comparator {
+public:
+    const char* Name() const { return "symNamesDBComparator"; }
+
+    void FindShortestSeparator(std::string*, const leveldb::Slice&) const {}
+    void FindShortSuccessor(std::string*) const {}
+
+    int Compare(const leveldb::Slice& s1, const leveldb::Slice& s2) const;
+};
+
+class DatabaseEntry {
+private:
+    int fileMapType_;
+    String key_;
+    String value_;
+    String entry_;
+
+    //
+    // Layout: (The fields are native encoding)
+    // +---------------+------------------------+-----+--------------------------+-------+
+    // | File Map Type | length of key (size_t) | Key | length of value (size_t) | Value |
+    // +---------------+------------------------+-----+--------------------------+-------+
+    //
+
+public:
+    const char *key() const
+    {
+        return key_.data();
+    }
+
+    size_t keyLength() const
+    {
+        return key_.size();
+    }
+
+    const char *value() const
+    {
+        return value_.data();
+    }
+
+    size_t valueLength() const
+    {
+        return value_.size();
+    }
+
+    const char *entry() const
+    {
+        return entry_.data();
+    }
+
+    size_t entryLength() const
+    {
+        return entry_.size();
+    }
+
+    int fileMapType() const
+    {
+        return fileMapType_;
+    }
+
+    void assign(int fileMapType, const String &key, const String &value)
+    {
+        fileMapType_ = fileMapType;
+        key_ = key;
+        value_ = value;
+        entry_.clear();
+
+        Serializer entrySerializer(entry_);
+        entrySerializer << fileMapType;
+        entrySerializer << key;
+        entrySerializer << value;
+    }
+
+    void assign(const String &entry)
+    {
+        Deserializer entryDeserializer(entry);
+        entryDeserializer >> fileMapType_;
+        entryDeserializer >> key_;
+        entryDeserializer >> value_;
+        entry_ = entry;
+    }
+};
+
 class Project : public std::enable_shared_from_this<Project>
 {
 public:
@@ -85,6 +170,7 @@ public:
         Usrs,
         Tokens
     };
+    static const int NFileMapTypes = 5;
     static const char *fileMapName(FileMapType type)
     {
         switch (type) {
@@ -131,6 +217,7 @@ public:
     };
 
     Set<uint32_t> dependencies(uint32_t fileId, DependencyMode mode) const;
+    Set<uint32_t> dependenciesByUsr(String usr, uint32_t fileId, DependencyMode mode) const;
     bool dependsOn(uint32_t source, uint32_t header) const;
     String dumpDependencies(uint32_t fileId,
                             const List<String> &args = List<String>(),
@@ -273,7 +360,19 @@ public:
     void forEachSource(std::function<VisitResult(const Source &source)> cb) const { forEachSource(mIndexParseData, cb); }
     void forEachSource(std::function<VisitResult(Source &source)> cb) { forEachSource(mIndexParseData, cb); }
     void validateAll();
+
+    enum DbFindType {
+        DbFindExact,
+        DbFindStartWith
+    };
+    leveldb::DB *ProjectDB() { return mProjectDB.get(); }
 private:
+    void dbRemoveSymbolNames(uint32_t fileId);
+    void dbRemoveUsrs(uint32_t fileId);
+    void dbRemoveTargets(uint32_t fileId);
+    void dbAddSymbolNames(uint32_t fileId);
+    void dbAddUsrs(uint32_t fileId);
+    void dbAddTargets(uint32_t fileId);
     void reloadCompileCommands();
     void onFileAddedOrModified(const Path &path);
     void watchFile(uint32_t fileId);
@@ -434,6 +533,72 @@ private:
     bool mSaveDirty;
 
     mutable std::mutex mMutex;
+
+    std::unique_ptr<leveldb::DB> mProjectDB;
+    projectDBComparator mProjectDBComparator;
+
+    template <typename Value, FileMapType mapType> void dbAdd(uint32_t fileId)
+    {
+        String error;
+        FileMap<String, Value> datafile;
+        Path path = sourceFilePath(fileId, fileMapName(mapType));
+
+        if (!datafile.load(path, fileMapOptions(), &error))
+            return;
+
+        const int cnt = datafile.count();
+
+        for (int i = 0; i < cnt; ++i) {
+            String key;
+            String value;
+            DatabaseEntry entry;
+            Serializer valueSerializer(value);
+
+            //
+            // Insertion of mapping to key-value store
+            //
+            key = datafile.keyAt(i);
+            valueSerializer << fileId;
+            entry.assign(mapType, key, value);
+
+            leveldb::Status status = mProjectDB->Put(leveldb::WriteOptions(),
+                                                     leveldb::Slice(entry.entry(), entry.entryLength()),
+                                                     leveldb::Slice());
+            if (!status.ok())
+                debug() << "Failed deletion of symbol: " << key.constData() << " - " << fileId;
+        }
+    }
+
+    template <typename Value, FileMapType mapType> void dbRemove(uint32_t fileId)
+    {
+        String error;
+        FileMap<String, Value> datafile;
+        Path path = sourceFilePath(fileId, fileMapName(mapType));
+
+        if (!datafile.load(path, fileMapOptions(), &error))
+            return;
+
+        const int cnt = datafile.count();
+
+        for (int i = 0; i < cnt; ++i) {
+            String key;
+            String value;
+            DatabaseEntry entry;
+            Serializer valueSerializer(value);
+
+            //
+            // Insertion of mapping to key-value store
+            //
+            key = datafile.keyAt(i);
+            valueSerializer << fileId;
+            entry.assign(mapType, key, value);
+
+            leveldb::Status status = mProjectDB->Delete(leveldb::WriteOptions(),
+                                                        leveldb::Slice(entry.entry(), entry.entryLength()));
+            if (!status.ok())
+                debug() << "Failed deletion of symbol: " << key.constData() << " - " << fileId;
+        }
+    }
 };
 
 RCT_FLAGS(Project::WatchMode);

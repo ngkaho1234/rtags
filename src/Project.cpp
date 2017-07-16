@@ -326,8 +326,44 @@ bool Project::readSources(const Path &path, IndexParseData &data, String *err)
     return true;
 }
 
+static std::list<DatabaseEntry>
+dbFind(leveldb::DB *db, Project::FileMapType fileMapType, Project::DbFindType matchType, const String &key)
+{
+    std::list<DatabaseEntry> ret;
+    std::unique_ptr<leveldb::Iterator> dbIt(db->NewIterator(leveldb::ReadOptions()));
+    DatabaseEntry entryFrom;
+
+    entryFrom.assign(fileMapType, key, String());
+    leveldb::Slice slicefrom(entryFrom.entry(), entryFrom.entryLength());
+
+    for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
+        DatabaseEntry entry;
+        leveldb::Slice slice = dbIt->key();
+
+        entry.assign(slice.ToString());
+
+        if (fileMapType != entry.fileMapType())
+            break;
+
+        if (matchType == Project::DbFindExact) {
+            if (entry.keyLength() != key.size() ||
+                        memcmp(key.data(), entry.key(), key.size()))
+                break;
+        } else if (matchType == Project::DbFindStartWith) {
+            if (entry.keyLength() < key.size() ||
+                        memcmp(key.data(), entry.key(), key.size()))
+                break;
+        } else
+            break;
+
+        ret.push_back(entry);
+    }
+    return ret;
+}
+
 bool Project::init()
 {
+    const Path databaseBasePath = mSourceFilePathBase + "ProjectDB";
     const JobScheduler::JobScope scope(Server::instance()->jobScheduler());
     const Server::Options &options = Server::instance()->options();
     if (!(options.options & Server::NoFileSystemWatch)) {
@@ -340,6 +376,22 @@ bool Project::init()
         mWatcher.removed().connect([this](const Path &path) { if (mWatchedPaths.value(path.parentDir()) & Watch_FileManager) mFileManager->onFileRemoved(path); });
         mWatcher.added().connect([this](const Path &path) { if (mWatchedPaths.value(path.parentDir()) & Watch_FileManager) mFileManager->onFileAdded(path); });
     }
+
+    Path::mkdir(databaseBasePath, Path::Recursive);
+
+    leveldb::Options dbOptions;
+    leveldb::DB *db;
+    dbOptions.comparator = &mProjectDBComparator;
+    dbOptions.create_if_missing = true;
+    const Path databasePath = databaseBasePath;
+    leveldb::Status status = leveldb::DB::Open(dbOptions,
+                                               databasePath.constData(),
+                                               &db);
+    if (!status.ok()) {
+        error("Cannot open database %s: %s", databasePath.c_str(), status.ToString().c_str());
+        return false;
+    }
+    mProjectDB.reset(db);
 
     mDirtyTimer.timeout().connect(std::bind(&Project::onDirtyTimeout, this, std::placeholders::_1));
     mReloadCompileCommandsTimer.timeout().connect(std::bind(&Project::reloadCompileCommands, this));
@@ -746,10 +798,13 @@ void Project::onJobFinished(const std::shared_ptr<IndexerJob> &job, const std::s
     updateFixIts(visited, msg->fixIts());
     updateDependencies(fileId, msg);
     if (success) {
-        forEachSources([&msg, fileId](Sources &sources) -> VisitResult {
+        forEachSources([this, &msg, fileId](Sources &sources) -> VisitResult {
                 // error() << "finished with" << Location::path(fileId) << sources.contains(fileId) << msg->parseTime();
                 if (sources.contains(fileId)) {
                     sources[fileId].parsed = msg->parseTime();
+                    dbAddSymbolNames(fileId);
+                    dbAddUsrs(fileId);
+                    dbAddTargets(fileId);
                 }
                 return Continue;
             });
@@ -887,6 +942,10 @@ void Project::index(const std::shared_ptr<IndexerJob> &job)
         mTimer.start();
     }
 
+    // Remove records from database for a fileID
+    dbRemoveSymbolNames(job->fileId());
+    dbRemoveUsrs(job->fileId());
+
     Server::instance()->jobScheduler()->add(job);
 }
 
@@ -1001,6 +1060,23 @@ Set<uint32_t> Project::dependencies(uint32_t fileId, DependencyMode mode) const
         }
     };
     fill(fileId);
+    return ret;
+}
+
+Set<uint32_t> Project::dependenciesByUsr(String usr, uint32_t fileId, DependencyMode mode) const
+{
+    Set<uint32_t> ret;
+    if (mode != All)
+        return dependencies(fileId, mode);
+
+    const std::list<DatabaseEntry> &entries =
+      dbFind(mProjectDB.get(), Usrs, DbFindExact, usr);
+    for (const auto &entry : entries) {
+        uint32_t valueFileId;
+        Deserializer valueDeserializer(entry.value(), entry.valueLength());
+        valueDeserializer >> valueFileId;
+        ret.insert(valueFileId);
+    }
     return ret;
 }
 
@@ -1384,8 +1460,13 @@ void Project::findSymbols(const String &unencoded,
     if (fileFilter) {
         processFile(fileFilter);
     } else {
-        for (const auto &dep : mDependencies) {
-            processFile(dep.first);
+        const std::list<DatabaseEntry> &entries =
+          dbFind(mProjectDB.get(), SymbolNames, DbFindStartWith, string);
+        for (const auto &entry : entries) {
+            uint32_t valueFileId;
+            Deserializer valueDeserializer(entry.value(), entry.valueLength());
+            valueDeserializer >> valueFileId;
+            processFile(valueFileId);
         }
     }
 }
@@ -1599,7 +1680,7 @@ Set<Symbol> Project::findByUsr(const String &usr, uint32_t fileId, DependencyMod
     assert(fileId);
     Set<Symbol> ret;
     String tusr = Sandbox::encoded(usr);
-    for (uint32_t file : dependencies(fileId, mode)) {
+    for (uint32_t file : dependenciesByUsr(tusr, fileId, mode)) {
         auto usrs = openUsrs(file);
         // error() << usrs << Location::path(file) << usr;
         if (usrs) {
@@ -1654,9 +1735,14 @@ static Set<Symbol> findReferences(const Set<Symbol> &inputs,
             process(dep);
 
         if (ret.isEmpty()) {
-            for (auto dep : project->dependencies()) {
-                if (!deps.contains(dep.first))
-                    process(dep.first);
+            const String tusr = Sandbox::encoded(input.usr);
+            const std::list<DatabaseEntry> &entries =
+              dbFind(project->ProjectDB(), Project::Targets, Project::DbFindExact, tusr);
+            for (const auto &entry : entries) {
+                uint32_t valueFileId;
+                Deserializer valueDeserializer(entry.value(), entry.valueLength());
+                valueDeserializer >> valueFileId;
+                process(valueFileId);
             }
         }
     }
@@ -2766,6 +2852,83 @@ void Project::forEachSource(IndexParseData &data, std::function<VisitResult(Sour
         });
 }
 
+int projectDBComparator::Compare(const leveldb::Slice& s1, const leveldb::Slice& s2) const
+{
+    DatabaseEntry entry1;
+    DatabaseEntry entry2;
+
+    entry1.assign(s1.ToString());
+    entry2.assign(s2.ToString());
+
+    //
+    // Compare the FileMapType field
+    //
+    if (entry1.fileMapType() < entry2.fileMapType())
+        return -1;
+    if (entry1.fileMapType() > entry2.fileMapType())
+        return 1;
+
+    //
+    // Compare the two keys
+    //
+    for (size_t i = 0; i < entry1.keyLength() && i < entry2.keyLength(); ++i) {
+        if (entry1.key()[i] < entry2.key()[i])
+            return -1;
+        if (entry1.key()[i] > entry2.key()[i])
+            return 1;
+    }
+    if (entry1.keyLength() < entry2.keyLength())
+        return -1;
+    if (entry1.keyLength() > entry2.keyLength())
+        return 1;
+
+    //
+    // Compare the two values if the two keys are equal
+    //
+    for (size_t i = 0; i < entry1.valueLength() && i < entry2.valueLength(); ++i) {
+        if (entry1.value()[i] < entry2.value()[i])
+            return -1;
+        if (entry1.value()[i] > entry2.value()[i])
+            return 1;
+    }
+    if (entry1.valueLength() < entry2.valueLength())
+        return -1;
+    if (entry1.valueLength() > entry2.valueLength())
+        return 1;
+
+    return 0;
+}
+
+void Project::dbAddSymbolNames(uint32_t fileId)
+{
+    dbAdd<Set<Location>, SymbolNames>(fileId);
+}
+
+void Project::dbAddUsrs(uint32_t fileId)
+{
+    dbAdd<Set<Location>, Usrs>(fileId);
+}
+
+void Project::dbAddTargets(uint32_t fileId)
+{
+    dbAdd<Set<Location>, Targets>(fileId);
+}
+
+void Project::dbRemoveSymbolNames(uint32_t fileId)
+{
+    dbRemove<Set<Location>, SymbolNames>(fileId);
+}
+
+void Project::dbRemoveUsrs(uint32_t fileId)
+{
+    dbRemove<Set<Location>, Usrs>(fileId);
+}
+
+void Project::dbRemoveTargets(uint32_t fileId)
+{
+    dbRemove<Set<Location>, Targets>(fileId);
+}
+
 void Project::removeSources(const Hash<uint32_t, uint32_t> &removed)
 {
     for (auto it : removed) {
@@ -2789,6 +2952,9 @@ void Project::removeSource(uint32_t fileId)
     dirty(fileId);
     releaseFileIds(file);
     removeDependencies(fileId);
+    dbRemoveSymbolNames(fileId);
+    dbRemoveUsrs(fileId);
+    dbRemoveTargets(fileId);
     Path::rmdir(sourceFilePath(fileId));
 }
 
