@@ -61,6 +61,8 @@ if (NOT DEFINED LIBCLANG_LIBRARIES OR NOT DEFINED LIBCLANG_CXXFLAGS OR NOT DEFIN
 endif ()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${LIBCLANG_CXXFLAGS}")
 
+find_package(LevelDB REQUIRED)
+
 if (NOT RTAGS_BUILD_CLANG)
     set(LIBCLANG_COMPILE_TEST "
 #include <clang-c/Index.h>
@@ -202,7 +204,7 @@ else ()
     set(END_GROUP "-Wl,--end-group")
 endif ()
 
-set(RTAGS_LIBRARIES rtags ${START_GROUP} ${LIBCLANG_LIBRARIES} ${END_GROUP})
+set(RTAGS_LIBRARIES rtags ${START_GROUP} ${LevelDB_LIBRARIES} ${LIBCLANG_LIBRARIES} ${END_GROUP})
 if (LUA_ENABLED)
     list(APPEND RTAGS_LIBRARIES -L${CMAKE_CURRENT_BINARY_DIR}/lua-prefix/src/lua-build/ liblua.a)
     add_definitions(-DRTAGS_HAS_LUA)

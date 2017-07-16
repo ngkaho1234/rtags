@@ -18,6 +18,7 @@
 
 #include <sys/stat.h>
 #include "Token.h"
+#include <leveldb/db.h>
 
 #include "IndexDataMessage.h"
 #include "rct/Hash.h"
