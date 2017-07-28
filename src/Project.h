@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <mutex>
 #include <leveldb/db.h>
+#include <leveldb/write_batch.h>
 #include <leveldb/comparator.h>
 
 #include "Diagnostic.h"
@@ -537,21 +538,21 @@ private:
     std::unique_ptr<leveldb::DB> mProjectDB;
     projectDBComparator mProjectDBComparator;
 
-    template <typename Value, FileMapType mapType> void dbAdd(uint32_t fileId)
+    template <typename Value, FileMapType fileMapType> void dbAdd(uint32_t fileId)
     {
-        String error;
+        leveldb::WriteBatch writeBatch;
         FileMap<String, Value> datafile;
-        Path path = sourceFilePath(fileId, fileMapName(mapType));
+        Path path = sourceFilePath(fileId, fileMapName(fileMapType));
+        const int reverseFileMapType = -fileMapType;
 
-        if (!datafile.load(path, fileMapOptions(), &error))
+        if (!datafile.load(path, fileMapOptions()))
             return;
 
         const int cnt = datafile.count();
 
         for (int i = 0; i < cnt; ++i) {
-            String key;
-            String value;
-            DatabaseEntry entry;
+            String key, value;
+            DatabaseEntry entry, reverseEntry;
             Serializer valueSerializer(value);
 
             //
@@ -559,45 +560,51 @@ private:
             //
             key = datafile.keyAt(i);
             valueSerializer << fileId;
-            entry.assign(mapType, key, value);
+            entry.assign(fileMapType, key, value);
+            reverseEntry.assign(reverseFileMapType, value, key);
 
-            leveldb::Status status = mProjectDB->Put(leveldb::WriteOptions(),
-                                                     leveldb::Slice(entry.entry(), entry.entryLength()),
-                                                     leveldb::Slice());
-            if (!status.ok())
-                debug() << "Failed deletion of symbol: " << key.constData() << " - " << fileId;
+            writeBatch.Put(leveldb::Slice(entry.entry(), entry.entryLength()), leveldb::Slice());
+            writeBatch.Put(leveldb::Slice(reverseEntry.entry(), reverseEntry.entryLength()),
+                           leveldb::Slice());
         }
+
+        leveldb::Status status = mProjectDB->Write(leveldb::WriteOptions(), &writeBatch);
+        if (!status.ok())
+            error() << "Failed addition WriteBatch:" << status.ToString();
     }
 
-    template <typename Value, FileMapType mapType> void dbRemove(uint32_t fileId)
+    template <typename Value, FileMapType fileMapType> void dbRemove(uint32_t fileId)
     {
-        String error;
-        FileMap<String, Value> datafile;
-        Path path = sourceFilePath(fileId, fileMapName(mapType));
+        DatabaseEntry reverseEntryFrom;
+        leveldb::WriteBatch writeBatch;
+        std::unique_ptr<leveldb::Iterator>dbIt(mProjectDB->NewIterator(leveldb::ReadOptions()));
+        String fileIdString;
+        Serializer fileIdSerializer(fileIdString);
+        const int reverseFileMapType = -fileMapType;
 
-        if (!datafile.load(path, fileMapOptions(), &error))
-            return;
+        fileIdSerializer << fileId;
+        reverseEntryFrom.assign(reverseFileMapType, fileIdString, String());
+        leveldb::Slice slicefrom(reverseEntryFrom.entry(), reverseEntryFrom.entryLength());
 
-        const int cnt = datafile.count();
+        for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
+            DatabaseEntry entry, reverseEntry;
+            leveldb::Slice slice = dbIt->key();
 
-        for (int i = 0; i < cnt; ++i) {
-            String key;
-            String value;
-            DatabaseEntry entry;
-            Serializer valueSerializer(value);
+            reverseEntry.assign(slice.ToString());
+            if (reverseFileMapType != reverseEntry.fileMapType())
+                break;
+            if (fileIdString != String(reverseEntry.key(), reverseEntry.keyLength()))
+                break;
 
-            //
-            // Insertion of mapping to key-value store
-            //
-            key = datafile.keyAt(i);
-            valueSerializer << fileId;
-            entry.assign(mapType, key, value);
-
-            leveldb::Status status = mProjectDB->Delete(leveldb::WriteOptions(),
-                                                        leveldb::Slice(entry.entry(), entry.entryLength()));
-            if (!status.ok())
-                debug() << "Failed deletion of symbol: " << key.constData() << " - " << fileId;
+            entry.assign(fileMapType, String(reverseEntry.value(), reverseEntry.valueLength()),
+                         fileIdString);
+            writeBatch.Delete(leveldb::Slice(entry.entry(), entry.entryLength()));
+            writeBatch.Delete(leveldb::Slice(reverseEntry.entry(), reverseEntry.entryLength()));
         }
+
+        leveldb::Status status = mProjectDB->Write(leveldb::WriteOptions(), &writeBatch);
+        if (!status.ok())
+            error() << "Failed removal WriteBatch:" << status.ToString();
     }
 };
 
