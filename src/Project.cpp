@@ -326,11 +326,10 @@ bool Project::readSources(const Path &path, IndexParseData &data, String *err)
     return true;
 }
 
-static std::list<DatabaseEntry>
-dbFind(leveldb::DB *db, Project::FileMapType fileMapType, Project::DbFindType matchType, const String &key)
+void Project::dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const String &key,
+                     const std::function<DbFindResult(const DatabaseEntry &entry)> &iterfunc) const
 {
-    std::list<DatabaseEntry> ret;
-    std::unique_ptr<leveldb::Iterator> dbIt(db->NewIterator(leveldb::ReadOptions()));
+    std::unique_ptr<leveldb::Iterator> dbIt(mProjectDB->NewIterator(leveldb::ReadOptions()));
     DatabaseEntry entryFrom;
 
     entryFrom.assign(fileMapType, key, String());
@@ -353,12 +352,12 @@ dbFind(leveldb::DB *db, Project::FileMapType fileMapType, Project::DbFindType ma
             if (entry.keyLength() < key.size() ||
                         memcmp(key.data(), entry.key(), key.size()))
                 break;
-        } else
-            break;
+        }
 
-        ret.push_back(entry);
+        DbFindResult result = iterfunc(entry);
+        if (result == DbFindStop)
+            break;
     }
-    return ret;
 }
 
 bool Project::init()
@@ -1069,14 +1068,14 @@ Set<uint32_t> Project::dependenciesByUsr(String usr, uint32_t fileId, Dependency
     if (mode != All)
         return dependencies(fileId, mode);
 
-    const std::list<DatabaseEntry> &entries =
-      dbFind(mProjectDB.get(), Usrs, DbFindExact, usr);
-    for (const auto &entry : entries) {
+    auto iterfunc = [&ret](const DatabaseEntry &entry)->DbFindResult {
         uint32_t valueFileId;
         Deserializer valueDeserializer(entry.value(), entry.valueLength());
         valueDeserializer >> valueFileId;
         ret.insert(valueFileId);
-    }
+        return DbFindContinue;
+    };
+    dbFind(Usrs, DbFindExact, usr, iterfunc);
     return ret;
 }
 
@@ -1460,14 +1459,14 @@ void Project::findSymbols(const String &unencoded,
     if (fileFilter) {
         processFile(fileFilter);
     } else {
-        const std::list<DatabaseEntry> &entries =
-          dbFind(mProjectDB.get(), SymbolNames, DbFindStartWith, string);
-        for (const auto &entry : entries) {
+        auto iterfunc = [&processFile](const DatabaseEntry &entry)->DbFindResult {
             uint32_t valueFileId;
             Deserializer valueDeserializer(entry.value(), entry.valueLength());
             valueDeserializer >> valueFileId;
             processFile(valueFileId);
-        }
+            return DbFindContinue;
+        };
+        dbFind(SymbolNames, DbFindStartWith, string, iterfunc);
     }
 }
 
@@ -1735,14 +1734,14 @@ static Set<Symbol> findReferences(const Set<Symbol> &inputs,
 
         if (ret.isEmpty()) {
             const String tusr = Sandbox::encoded(input.usr);
-            const std::list<DatabaseEntry> &entries =
-              dbFind(project->ProjectDB(), Project::Targets, Project::DbFindExact, tusr);
-            for (const auto &entry : entries) {
+            auto iterfunc = [&process](const DatabaseEntry &entry)->Project::DbFindResult {
                 uint32_t valueFileId;
                 Deserializer valueDeserializer(entry.value(), entry.valueLength());
                 valueDeserializer >> valueFileId;
                 process(valueFileId);
-            }
+                return Project::DbFindContinue;
+            };
+            project->dbFind(Project::Targets, Project::DbFindExact, tusr, iterfunc);
         }
     }
     return ret;

@@ -366,7 +366,12 @@ public:
         DbFindExact,
         DbFindStartWith
     };
-    leveldb::DB *ProjectDB() { return mProjectDB.get(); }
+    enum DbFindResult {
+        DbFindContinue,
+        DbFindStop
+    };
+    void dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const String &key,
+                const std::function<DbFindResult(const DatabaseEntry &entry)> &iterfunc) const;
 private:
     void dbRemoveSymbolNames(uint32_t fileId);
     void dbRemoveUsrs(uint32_t fileId);
