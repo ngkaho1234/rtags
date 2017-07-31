@@ -94,39 +94,29 @@ private:
     //
 
 public:
-    const char *key() const
-    {
-        return key_.data();
-    }
-
-    size_t keyLength() const
-    {
-        return key_.size();
-    }
-
-    const char *value() const
-    {
-        return value_.data();
-    }
-
-    size_t valueLength() const
-    {
-        return value_.size();
-    }
-
-    const char *entry() const
-    {
-        return entry_.data();
-    }
-
-    size_t entryLength() const
-    {
-        return entry_.size();
-    }
-
     int fileMapType() const
     {
         return fileMapType_;
+    }
+
+    const String &key() const
+    {
+        return key_;
+    }
+
+    const String &value() const
+    {
+        return value_;
+    }
+
+    const String &entry() const
+    {
+        return entry_;
+    }
+
+    operator leveldb::Slice() const
+    {
+        return entry_.ref();
     }
 
     void assign(int fileMapType, const String &key, const String &value)
@@ -568,9 +558,8 @@ private:
             entry.assign(fileMapType, key, value);
             reverseEntry.assign(reverseFileMapType, value, key);
 
-            writeBatch.Put(leveldb::Slice(entry.entry(), entry.entryLength()), leveldb::Slice());
-            writeBatch.Put(leveldb::Slice(reverseEntry.entry(), reverseEntry.entryLength()),
-                           leveldb::Slice());
+            writeBatch.Put(entry, leveldb::Slice());
+            writeBatch.Put(reverseEntry, leveldb::Slice());
         }
 
         leveldb::Status status = mProjectDB->Write(leveldb::WriteOptions(), &writeBatch);
@@ -589,7 +578,7 @@ private:
 
         fileIdSerializer << fileId;
         reverseEntryFrom.assign(reverseFileMapType, fileIdString, String());
-        leveldb::Slice slicefrom(reverseEntryFrom.entry(), reverseEntryFrom.entryLength());
+        leveldb::Slice slicefrom(reverseEntryFrom);
 
         for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
             DatabaseEntry entry, reverseEntry;
@@ -598,13 +587,12 @@ private:
             reverseEntry.assign(slice.ToString());
             if (reverseFileMapType != reverseEntry.fileMapType())
                 break;
-            if (fileIdString != String(reverseEntry.key(), reverseEntry.keyLength()))
+            if (fileIdString != reverseEntry.key())
                 break;
 
-            entry.assign(fileMapType, String(reverseEntry.value(), reverseEntry.valueLength()),
-                         fileIdString);
-            writeBatch.Delete(leveldb::Slice(entry.entry(), entry.entryLength()));
-            writeBatch.Delete(leveldb::Slice(reverseEntry.entry(), reverseEntry.entryLength()));
+            entry.assign(fileMapType, reverseEntry.value(), fileIdString);
+            writeBatch.Delete(entry);
+            writeBatch.Delete(reverseEntry);
         }
 
         leveldb::Status status = mProjectDB->Write(leveldb::WriteOptions(), &writeBatch);
