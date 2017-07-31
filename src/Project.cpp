@@ -333,7 +333,7 @@ void Project::dbFind(Project::FileMapType fileMapType, Project::DbFindType match
     DatabaseEntry entryFrom;
 
     entryFrom.assign(fileMapType, key, String());
-    leveldb::Slice slicefrom(entryFrom.entry(), entryFrom.entryLength());
+    leveldb::Slice slicefrom(entryFrom);
 
     for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
         DatabaseEntry entry;
@@ -345,12 +345,10 @@ void Project::dbFind(Project::FileMapType fileMapType, Project::DbFindType match
             break;
 
         if (matchType == Project::DbFindExact) {
-            if (entry.keyLength() != key.size() ||
-                        memcmp(key.data(), entry.key(), key.size()))
+            if (entry.key() != key)
                 break;
         } else if (matchType == Project::DbFindStartWith) {
-            if (entry.keyLength() < key.size() ||
-                        memcmp(key.data(), entry.key(), key.size()))
+            if (entry.key().size() < key.size() || memcmp(key.data(), entry.key().data(), key.size()))
                 break;
         }
 
@@ -1070,7 +1068,7 @@ Set<uint32_t> Project::dependenciesByUsr(String usr, uint32_t fileId, Dependency
 
     auto iterfunc = [&ret](const DatabaseEntry &entry)->DbFindResult {
         uint32_t valueFileId;
-        Deserializer valueDeserializer(entry.value(), entry.valueLength());
+        Deserializer valueDeserializer(entry.value());
         valueDeserializer >> valueFileId;
         ret.insert(valueFileId);
         return DbFindContinue;
@@ -1461,7 +1459,7 @@ void Project::findSymbols(const String &unencoded,
     } else {
         auto iterfunc = [&processFile](const DatabaseEntry &entry)->DbFindResult {
             uint32_t valueFileId;
-            Deserializer valueDeserializer(entry.value(), entry.valueLength());
+            Deserializer valueDeserializer(entry.value());
             valueDeserializer >> valueFileId;
             processFile(valueFileId);
             return DbFindContinue;
@@ -1737,7 +1735,7 @@ static Set<Symbol> findReferences(const Set<Symbol> &inputs,
             const String tusr = Sandbox::encoded(input.usr);
             auto iterfunc = [&process](const DatabaseEntry &entry)->Project::DbFindResult {
                 uint32_t valueFileId;
-                Deserializer valueDeserializer(entry.value(), entry.valueLength());
+                Deserializer valueDeserializer(entry.value());
                 valueDeserializer >> valueFileId;
                 process(valueFileId);
                 return Project::DbFindContinue;
@@ -2867,32 +2865,17 @@ int projectDBComparator::Compare(const leveldb::Slice& s1, const leveldb::Slice&
     if (entry1.fileMapType() > entry2.fileMapType())
         return 1;
 
-    //
-    // Compare the two keys
-    //
-    for (size_t i = 0; i < entry1.keyLength() && i < entry2.keyLength(); ++i) {
-        if (entry1.key()[i] < entry2.key()[i])
-            return -1;
-        if (entry1.key()[i] > entry2.key()[i])
-            return 1;
-    }
-    if (entry1.keyLength() < entry2.keyLength())
+    if (entry1.key() < entry2.key())
         return -1;
-    if (entry1.keyLength() > entry2.keyLength())
+    if (entry1.key() > entry2.key())
         return 1;
 
     //
     // Compare the two values if the two keys are equal
     //
-    for (size_t i = 0; i < entry1.valueLength() && i < entry2.valueLength(); ++i) {
-        if (entry1.value()[i] < entry2.value()[i])
-            return -1;
-        if (entry1.value()[i] > entry2.value()[i])
-            return 1;
-    }
-    if (entry1.valueLength() < entry2.valueLength())
+    if (entry1.value() < entry2.value())
         return -1;
-    if (entry1.valueLength() > entry2.valueLength())
+    if (entry1.value() > entry2.value())
         return 1;
 
     return 0;
