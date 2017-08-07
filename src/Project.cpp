@@ -326,29 +326,29 @@ bool Project::readSources(const Path &path, IndexParseData &data, String *err)
     return true;
 }
 
-void Project::dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const String &key,
+void Project::dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const Blob &key,
                      const std::function<DbFindResult(const DatabaseEntry &entry)> &iterfunc) const
 {
     std::unique_ptr<leveldb::Iterator> dbIt(mProjectDB->NewIterator(leveldb::ReadOptions()));
     DatabaseEntry entryFrom;
 
-    entryFrom.assign(fileMapType, key, String());
+    entryFrom.assign(fileMapType, key, Blob());
     leveldb::Slice slicefrom(entryFrom);
 
     for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
         DatabaseEntry entry;
         leveldb::Slice slice = dbIt->key();
 
-        entry.assign(slice.ToString());
+        entry.assign(Blob(slice.data(), slice.size()));
 
         if (fileMapType != entry.fileMapType())
             break;
 
         if (matchType == Project::DbFindExact) {
-            if (entry.key() != key)
+            if (entry.key().compare(key))
                 break;
         } else if (matchType == Project::DbFindStartWith) {
-            if (entry.key().size() < key.size() || memcmp(key.data(), entry.key().data(), key.size()))
+            if (!key.compare(entry.key()))
                 break;
         }
 
@@ -1068,12 +1068,12 @@ Set<uint32_t> Project::dependenciesByUsr(String usr, uint32_t fileId, Dependency
 
     auto iterfunc = [&ret](const DatabaseEntry &entry)->DbFindResult {
         uint32_t valueFileId;
-        Deserializer valueDeserializer(entry.value());
+        Deserializer valueDeserializer = getBlobDeserializer(entry.value());
         valueDeserializer >> valueFileId;
         ret.insert(valueFileId);
         return DbFindContinue;
     };
-    dbFind(Usrs, DbFindExact, usr, iterfunc);
+    dbFind(Usrs, DbFindExact, Blob(usr.data(), usr.size()), iterfunc);
     return ret;
 }
 
@@ -1459,12 +1459,12 @@ void Project::findSymbols(const String &unencoded,
     } else {
         auto iterfunc = [&processFile](const DatabaseEntry &entry)->DbFindResult {
             uint32_t valueFileId;
-            Deserializer valueDeserializer(entry.value());
+            Deserializer valueDeserializer = getBlobDeserializer(entry.value());
             valueDeserializer >> valueFileId;
             processFile(valueFileId);
             return DbFindContinue;
         };
-        dbFind(SymbolNames, DbFindStartWith, string, iterfunc);
+        dbFind(SymbolNames, DbFindStartWith, Blob(string.data(), string.size()), iterfunc);
     }
 }
 
@@ -1734,12 +1734,12 @@ static Set<Symbol> findReferences(const Set<Symbol> &inputs,
             const String tusr = Sandbox::encoded(input.usr);
             auto iterfunc = [&process](const DatabaseEntry &entry)->Project::DbFindResult {
                 uint32_t valueFileId;
-                Deserializer valueDeserializer(entry.value());
+                Deserializer valueDeserializer = getBlobDeserializer(entry.value());
                 valueDeserializer >> valueFileId;
                 process(valueFileId);
                 return Project::DbFindContinue;
             };
-            project->dbFind(Project::Targets, Project::DbFindExact, tusr, iterfunc);
+            project->dbFind(Project::Targets, Project::DbFindExact, Blob(tusr.data(), tusr.size()), iterfunc);
         }
     }
     return ret;
@@ -2853,8 +2853,8 @@ int projectDBComparator::Compare(const leveldb::Slice& s1, const leveldb::Slice&
     DatabaseEntry entry1;
     DatabaseEntry entry2;
 
-    entry1.assign(s1.ToString());
-    entry2.assign(s2.ToString());
+    entry1.assign(Blob(s1.data(), s1.size()));
+    entry2.assign(Blob(s2.data(), s2.size()));
 
     //
     // Compare the FileMapType field
@@ -2864,17 +2864,17 @@ int projectDBComparator::Compare(const leveldb::Slice& s1, const leveldb::Slice&
     if (entry1.fileMapType() > entry2.fileMapType())
         return 1;
 
-    if (entry1.key() < entry2.key())
+    if (entry1.key().compare(entry2.key()) < 0)
         return -1;
-    if (entry1.key() > entry2.key())
+    if (entry1.key().compare(entry2.key()) > 0)
         return 1;
 
     //
     // Compare the two values if the two keys are equal
     //
-    if (entry1.value() < entry2.value())
+    if (entry1.value().compare(entry2.value()) < 0)
         return -1;
-    if (entry1.value() > entry2.value())
+    if (entry1.value().compare(entry2.value()) > 0)
         return 1;
 
     return 0;

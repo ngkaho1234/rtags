@@ -22,6 +22,7 @@
 #include <leveldb/write_batch.h>
 #include <leveldb/comparator.h>
 
+#include "Blob.h"
 #include "Diagnostic.h"
 #include "FileMap.h"
 #include "IndexerJob.h"
@@ -82,9 +83,9 @@ public:
 class DatabaseEntry {
 private:
     int fileMapType_;
-    String key_;
-    String value_;
-    String entry_;
+    Blob key_;
+    Blob value_;
+    Blob entry_;
 
     //
     // Layout: (The fields are native encoding)
@@ -99,42 +100,42 @@ public:
         return fileMapType_;
     }
 
-    const String &key() const
+    const Blob &key() const
     {
         return key_;
     }
 
-    const String &value() const
+    const Blob &value() const
     {
         return value_;
     }
 
-    const String &entry() const
+    const Blob &entry() const
     {
         return entry_;
     }
 
     operator leveldb::Slice() const
     {
-        return entry_.ref();
+        return leveldb::Slice(entry_.data(), entry_.size());
     }
 
-    void assign(int fileMapType, const String &key, const String &value)
+    void assign(int fileMapType, const Blob &key, const Blob &value)
     {
         fileMapType_ = fileMapType;
         key_ = key;
         value_ = value;
         entry_.clear();
 
-        Serializer entrySerializer(entry_);
+        Serializer entrySerializer = getBlobSerializer(entry_);
         entrySerializer << fileMapType;
         entrySerializer << key;
         entrySerializer << value;
     }
 
-    void assign(const String &entry)
+    void assign(const Blob &entry)
     {
-        Deserializer entryDeserializer(entry);
+        Deserializer entryDeserializer = getBlobDeserializer(entry);
         entryDeserializer >> fileMapType_;
         entryDeserializer >> key_;
         entryDeserializer >> value_;
@@ -360,7 +361,7 @@ public:
         DbFindContinue,
         DbFindStop
     };
-    void dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const String &key,
+    void dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const Blob &key,
                 const std::function<DbFindResult(const DatabaseEntry &entry)> &iterfunc) const;
 private:
     void dbRemoveSymbolNames(uint32_t fileId);
@@ -546,17 +547,19 @@ private:
         const int cnt = datafile.count();
 
         for (int i = 0; i < cnt; ++i) {
-            String key, value;
+            Blob keyBlob, valueBlob;
             DatabaseEntry entry, reverseEntry;
-            Serializer valueSerializer(value);
+            Serializer valueSerializer = getBlobSerializer(valueBlob);
 
             //
             // Insertion of mapping to key-value store
             //
-            key = datafile.keyAt(i);
+            String &&key = datafile.keyAt(i);
+            keyBlob.assign(key.data(), key.size());
             valueSerializer << fileId;
-            entry.assign(fileMapType, key, value);
-            reverseEntry.assign(reverseFileMapType, value, key);
+
+            entry.assign(fileMapType, keyBlob, valueBlob);
+            reverseEntry.assign(reverseFileMapType, valueBlob, keyBlob);
 
             writeBatch.Put(entry, leveldb::Slice());
             writeBatch.Put(reverseEntry, leveldb::Slice());
@@ -572,25 +575,25 @@ private:
         DatabaseEntry reverseEntryFrom;
         leveldb::WriteBatch writeBatch;
         std::unique_ptr<leveldb::Iterator>dbIt(mProjectDB->NewIterator(leveldb::ReadOptions()));
-        String fileIdString;
-        Serializer fileIdSerializer(fileIdString);
+        Blob fileIdBlob;
+        Serializer fileIdSerializer = getBlobSerializer(fileIdBlob);
         const int reverseFileMapType = -fileMapType;
 
         fileIdSerializer << fileId;
-        reverseEntryFrom.assign(reverseFileMapType, fileIdString, String());
+        reverseEntryFrom.assign(reverseFileMapType, fileIdBlob, Blob());
         leveldb::Slice slicefrom(reverseEntryFrom);
 
         for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
             DatabaseEntry entry, reverseEntry;
             leveldb::Slice slice = dbIt->key();
 
-            reverseEntry.assign(slice.ToString());
+            reverseEntry.assign(Blob(slice.data(), slice.size()));
+            entry.assign(fileMapType, reverseEntry.value(), reverseEntry.key());
             if (reverseFileMapType != reverseEntry.fileMapType())
                 break;
-            if (fileIdString != reverseEntry.key())
+            if (fileIdBlob.compare(reverseEntry.key()))
                 break;
 
-            entry.assign(fileMapType, reverseEntry.value(), fileIdString);
             writeBatch.Delete(entry);
             writeBatch.Delete(reverseEntry);
         }
