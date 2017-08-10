@@ -348,7 +348,7 @@ void Project::dbFind(Project::FileMapType fileMapType, Project::DbFindType match
             if (entry.key().compare(key))
                 break;
         } else if (matchType == Project::DbFindStartWith) {
-            if (!key.compare(entry.key()))
+            if (!entry.key().startsWith(key))
                 break;
         }
 
