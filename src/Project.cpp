@@ -1464,7 +1464,10 @@ void Project::findSymbols(const String &unencoded,
             processFile(valueFileId);
             return DbFindContinue;
         };
-        dbFind(SymbolNames, DbFindStartWith, Blob(string.data(), string.size()), iterfunc);
+        if (!caseInsensitive && !regex)
+            dbFind(SymbolNames, DbFindStartWith, Blob(string.data(), string.size()), iterfunc);
+        else
+            dbFind(SymbolNames, DbFindStartWith, Blob(), iterfunc);
     }
 }
 
