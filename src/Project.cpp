@@ -258,6 +258,7 @@ static void saveDependencies(DataFile &file, const Dependencies &dependencies)
 
 Project::Project(const Path &path)
     : mPath(path), mProjectDataDir(RTags::encodeSourceFilePath(Server::instance()->options().dataDir, path)),
+      mDatabasePath(RTags::encodeDatabaseFilePath(Server::instance()->options().dataDir, path)),
       mJobCounter(0), mJobsStarted(0), mBytesWritten(0), mSaveDirty(false)
 {
     mProjectFilePath = mProjectDataDir + "project";
@@ -335,6 +336,15 @@ bool Project::init()
         mFileManager.reset(new FileManager(shared_from_this()));
         mWatcher.removed().connect([this](const Path &path) { if (mWatchedPaths.value(path.parentDir()) & Watch_FileManager) mFileManager->onFileRemoved(path); });
         mWatcher.added().connect([this](const Path &path) { if (mWatchedPaths.value(path.parentDir()) & Watch_FileManager) mFileManager->onFileAdded(path); });
+    }
+
+    Path::mkdir(mDatabasePath.parentDir(), Path::Recursive);
+
+    try {
+        mProjectDatabase.reset(new TableDatabase(mDatabasePath, true));
+    } catch (TableDatabaseException &e) {
+        error("%s:%u. Database error. Database path: \"%s\" Code: %d Reason: %s",
+              __FILE__, __LINE__, mDatabasePath.c_str(), e.getErrorCode(), e.getErrorStr().c_str());
     }
 
     mDirtyTimer.timeout().connect(std::bind(&Project::onDirtyTimeout, this, std::placeholders::_1));
@@ -481,6 +491,13 @@ bool Project::init()
         startDirtyJobs(&simple, IndexerJob::Dirty);
     }
     return true;
+}
+
+void Project::destroy()
+{
+    mSaveDirty = false;
+    mProjectDatabase.reset();
+    Path::rm(mDatabasePath);
 }
 
 bool Project::match(const Match &p, bool *indexed) const
@@ -789,7 +806,7 @@ void Project::onJobFinished(const std::shared_ptr<IndexerJob> &job, const std::s
     updateFixIts(visited, msg->fixIts());
     updateDependencies(fileId, msg);
     if (success) {
-        forEachSources([&msg, fileId](Sources &sources) -> VisitResult {
+        forEachSources([this, &msg, fileId](Sources &sources) -> VisitResult {
                 // error() << "finished with" << Location::path(fileId) << sources.contains(fileId) << msg->parseTime();
                 if (sources.contains(fileId)) {
                     sources[fileId].parsed = msg->parseTime();
@@ -1060,6 +1077,25 @@ Set<uint32_t> Project::dependencies(uint32_t fileId, DependencyMode mode) const
         }
     };
     fill(fileId);
+    return ret;
+}
+
+Set<uint32_t> Project::dependenciesByUsr(String usr, uint32_t fileId, DependencyMode mode) const
+{
+    Set<uint32_t> ret;
+    if (mode != All)
+        return dependencies(fileId, mode);
+
+    auto iterfunc = [&ret](uint32_t iterFileId, const String &) -> TableDatabase::QueryResult {
+        ret.insert(iterFileId);
+        return TableDatabase::Continue;
+    };
+    try {
+        mProjectDatabase->queryUsrs(0, usr, false, iterfunc);
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+    }
     return ret;
 }
 
@@ -1438,56 +1474,43 @@ void Project::findSymbols(const String &unencoded,
         lowerBound = string;
     }
 
-    auto processFile = [this, &lowerBound, &string, wildcard, regex, &rx, cs, &inserter](uint32_t file) {
-        auto symNames = openSymbolNames(file);
-        if (!symNames)
-            return;
-        const int count = symNames->count();
-        // error() << "Looking at" << count << Location::path(dep.first)
-        //         << lowerBound << string;
-        uint32_t idx = 0;
-        if (!lowerBound.isEmpty()) {
-            idx = symNames->lowerBound(lowerBound);
-            if (idx == std::numeric_limits<uint32_t>::max()) {
-                return;
-            }
-        }
+    auto iterfunc = [&](uint32_t fileId, const String &symbolName) -> TableDatabase::QueryResult {
+        auto fileMap = openSymbolNames(fileId);
+        if (!fileMap)
+            return TableDatabase::Continue;
 
-        for (int i=idx; i<count; ++i) {
-            const String entry = symNames->keyAt(i);
-            // error() << i << count << entry;
-            SymbolMatchType type = Exact;
-            if (!string.isEmpty()) {
-                if (wildcard) {
-                    if (!Rct::wildCmp(string.constData(), entry.constData(), cs)) {
-                        continue;
-                    }
-                    type = Wildcard;
-                } else if (regex) {
-                    if (!std::regex_search(entry.ref(), rx)) {
-                        continue;
-                    }
-                    type = Regexp;
-                } else if (!entry.startsWith(string, cs)) {
-                    if (cs == String::CaseInsensitive) {
-                        continue;
-                    } else {
-                        break;
-                    }
-                } else if (entry.size() != string.size()) {
-                    type = StartsWith;
+        Set<Location> locs = fileMap->value(symbolName);
+        SymbolMatchType type = Exact;
+        if (!string.isEmpty()) {
+            if (wildcard) {
+                if (!Rct::wildCmp(string.constData(), symbolName.constData(), cs)) {
+                    return TableDatabase::Continue;
                 }
+                type = Wildcard;
+            } else if (regex) {
+                if (!std::regex_search(symbolName.ref(), rx)) {
+                    return TableDatabase::Continue;
+                }
+                type = Regexp;
+            } else if (!symbolName.startsWith(string, cs)) {
+                if (cs == String::CaseInsensitive) {
+                    return TableDatabase::Continue;
+                } else {
+                    return TableDatabase::Stop;
+                }
+            } else if (symbolName.size() != string.size()) {
+                type = StartsWith;
             }
-            inserter(type, entry, symNames->valueAt(i));
         }
+        inserter(type, symbolName, locs);
+        return TableDatabase::Continue;
     };
 
-    if (fileFilter) {
-        processFile(fileFilter);
-    } else {
-        for (const auto &dep : mDependencies) {
-            processFile(dep.first);
-        }
+    try {
+        mProjectDatabase->querySymbolNames(fileFilter, lowerBound, true, iterfunc);
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
     }
 }
 
@@ -1700,20 +1723,26 @@ Set<Symbol> Project::findByUsr(const String &usr, uint32_t fileId, DependencyMod
     assert(fileId);
     Set<Symbol> ret;
     String tusr = Sandbox::encoded(usr);
-    for (uint32_t file : dependencies(fileId, mode)) {
-        auto usrs = openUsrs(file);
-        // error() << usrs << Location::path(file) << usr;
-        if (usrs) {
-            // SBROOT
-            for (Location loc : usrs->value(tusr)) {
+    for (uint32_t file : dependenciesByUsr(tusr, fileId, mode)) {
+        auto fileMap = openUsrs(file);
+        if (!fileMap)
+            continue;
+
+        auto iterfunc = [&ret, &fileMap, this](uint32_t, const String &usrGot) -> TableDatabase::QueryResult {
+            Set<Location> locs = fileMap->value(usrGot);
+            for (Location loc : locs) {
                 // error() << "got a loc" << loc;
                 const Symbol c = findSymbol(loc);
                 if (!c.isNull())
                     ret.insert(c);
             }
-            // for (int i=0; i<usrs->count(); ++i) {
-            //     error() << i << usrs->count() << usrs->keyAt(i) << usrs->valueAt(i);
-            // }
+            return TableDatabase::Continue;
+        };
+        try {
+            mProjectDatabase->queryUsrs(file, tusr, false, iterfunc);
+        } catch (TableDatabaseException &e) {
+            error() << __FILE__ << ':' << __LINE__ << "."
+                    << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
         }
     }
 
@@ -1736,18 +1765,26 @@ static Set<Symbol> findReferences(const Set<Symbol> &inputs,
     for (const Symbol &input : inputs) {
         //warning() << "Calling findReferences" << input.location;
         auto process = [&](uint32_t dep) {
+            auto fileMap = project->openTargets(dep);
+            if (!fileMap)
+                return;
+
             // error() << "Looking at file" << Location::path(dep) << "for input" << input.location;
-            auto targets = project->openTargets(dep);
-            if (targets) {
-                // SBROOT
-                const String tusr = Sandbox::encoded(input.usr);
-                const Set<Location> locations = targets->value(tusr);
-                // error() << "Got locations for usr" << input.usr << locations;
-                for (const auto &loc : locations) {
+            auto iterfunc = [&project, &fileMap, &input, &filter, &ret](uint32_t, const String &target) -> TableDatabase::QueryResult {
+                Set<Location> locs = fileMap->value(target);
+                for (const auto &loc : locs) {
                     auto sym = project->findSymbol(loc);
                     if (filter(input, sym))
                         ret.insert(sym);
                 }
+                return TableDatabase::Continue;
+            };
+            try {
+                const String tusr = Sandbox::encoded(input.usr);
+                project->mProjectDatabase->queryTargets(dep, tusr, false, iterfunc);
+            } catch (TableDatabaseException &e) {
+                error() << __FILE__ << ':' << __LINE__ << "."
+                        << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
             }
         };
         const Set<uint32_t> deps = project->dependencies(input.location.fileId(), Project::DependsOnArg);
@@ -1755,9 +1792,16 @@ static Set<Symbol> findReferences(const Set<Symbol> &inputs,
             process(dep);
 
         if (ret.isEmpty()) {
-            for (auto dep : project->dependencies()) {
-                if (!deps.contains(dep.first))
-                    process(dep.first);
+            const String tusr = Sandbox::encoded(input.usr);
+            auto iterfunc = [&process](uint32_t fileId, const String &) -> TableDatabase::QueryResult {
+                process(fileId);
+                return TableDatabase::Continue;
+            };
+            try {
+                project->mProjectDatabase->queryUsrs(0, tusr, false, iterfunc);
+            } catch (TableDatabaseException &e) {
+                error() << __FILE__ << ':' << __LINE__ << "."
+                        << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
             }
         }
     }
@@ -1906,15 +1950,23 @@ Set<Symbol> Project::findVirtuals(const Symbol &symbol)
 Set<String> Project::findTargetUsrs(Location loc)
 {
     Set<String> usrs;
-    auto targets = openTargets(loc.fileId());
-    if (targets) {
-        const int count = targets->count();
-        for (int i=0; i<count; ++i) {
-            if (targets->valueAt(i).contains(loc)) {
-                // SBROOT
-                usrs.insert(Sandbox::decoded(targets->keyAt(i)));
-            }
+    auto fileMap = openTargets(loc.fileId());
+    if (!fileMap)
+        return usrs;
+
+    auto iterfunc = [&fileMap, &usrs, &loc](uint32_t, const String &target) -> TableDatabase::QueryResult {
+        Set<Location> locs = fileMap->value(target);
+        if (locs.contains(loc)) {
+            // SBROOT
+            usrs.insert(Sandbox::decoded(target));
         }
+        return TableDatabase::Continue;
+    };
+    try {
+        mProjectDatabase->queryTargets(loc.fileId(), String(), true, iterfunc);
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
     }
     return usrs;
 }
@@ -1927,15 +1979,23 @@ Set<String> Project::findTargetUsrs(const Symbol &symbol)
 
     Set<String> usrs;
     for (uint32_t fileId : dependencies(symbol.location.fileId(), DependsOnArg)) {
-        auto targets = openTargets(fileId);
-        if (targets) {
-            const int count = targets->count();
-            for (int i=0; i<count; ++i) {
-                if (targets->valueAt(i).contains(symbol.location)) {
-                    // SBROOT
-                    usrs.insert(Sandbox::decoded(targets->keyAt(i)));
-                }
+        auto fileMap = openTargets(fileId);
+        if (!fileMap)
+            continue;
+
+        auto iterfunc = [&fileMap, &usrs, &symbol](uint32_t, const String &target) -> TableDatabase::QueryResult {
+            Set<Location> locs = fileMap->value(target);
+            if (locs.contains(symbol.location)) {
+                // SBROOT
+                usrs.insert(Sandbox::decoded(target));
             }
+            return TableDatabase::Continue;
+        };
+        try {
+            mProjectDatabase->queryTargets(fileId, String(), true, iterfunc);
+        } catch (TableDatabaseException &e) {
+            error() << __FILE__ << ':' << __LINE__ << "."
+                    << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
         }
     }
     return usrs;
@@ -2351,10 +2411,7 @@ void Project::prepare(uint32_t fileId)
     if (fileId && isIndexed(fileId)) {
         beginScope();
         String err;
-        openSymbolNames(fileId, &err);
         openSymbols(fileId, &err);
-        openTargets(fileId, &err);
-        openUsrs(fileId, &err);
         debug() << "Prepared" << Location::path(fileId);
         endScope();
     }
@@ -2890,6 +2947,12 @@ void Project::removeSource(uint32_t fileId)
     dirty(fileId);
     releaseFileIds(file);
     removeDependencies(fileId);
+    try{
+        mProjectDatabase->deleteUnit(fileId);
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database error" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+    }
     Path::rmdir(sourceFilePath(fileId));
 }
 

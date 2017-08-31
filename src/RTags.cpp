@@ -96,6 +96,15 @@ Path encodeSourceFilePath(const Path &dataDir, const Path &project, uint32_t fil
     return str;
 }
 
+Path encodeDatabaseFilePath(const Path &dataDir, const Path &project)
+{
+    String str = dataDir;
+    Path p = project;
+    encodePath(p);
+    str << "databases" << '/' << p << ".db";
+    return str;
+}
+
 Path findAncestor(Path path, const String &fn, Flags<FindAncestorFlag> flags, SourceCache *cache)
 {
     Path *cacheResult = 0;

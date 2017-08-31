@@ -33,6 +33,7 @@
 #include "VisitFileMessage.h"
 #include "VisitFileResponseMessage.h"
 #include "Location.h"
+#include "TableDatabase.h"
 
 static inline String usr(const CXCursor &cursor)
 {
@@ -2033,6 +2034,7 @@ bool ClangIndexer::writeFiles(const Path &root, String &error)
     const Path p = Sandbox::encoded(mSourceFile);
     const bool hasRoot = Sandbox::hasRoot();
     const uint32_t fileId = mSources.front().fileId;
+    std::unique_ptr<TableDatabase> databasePtr;
 
     auto process = [&](Hash<uint32_t, std::shared_ptr<Unit> >::const_iterator unit) {
         assert(mIndexDataMessage.files().value(unit->first) & IndexDataMessage::Visited);
@@ -2114,37 +2116,55 @@ bool ClangIndexer::writeFiles(const Path &root, String &error)
             return false;
         }
         bytesWritten += w;
+
+        TableDatabase::UpdateUnitArgs updateArgs;
+        Map<String, Set<Location> > normalizedTargets = convertTargets(unit->second->targets, hasRoot);
+        updateArgs.symbolNames = &unit->second->symbolNames;
+        updateArgs.targets = &normalizedTargets;
+        updateArgs.usrs = &unit->second->usrs;
+        databasePtr->updateUnit(unit->first, updateArgs);
+
         return true;
     };
 
-    List<std::shared_ptr<Unit> > templateSpecializationTargets;
-    auto self = mUnits.end();
-    for (auto it = mUnits.begin(); it != mUnits.end(); ++it) {
-        if (!(mIndexDataMessage.files().value(it->first) & IndexDataMessage::Visited)) {
-            ::error() << "Wanting to write something for"
-                      << it->first << Location::path(it->first)
-                      << "but we didn't visit it" << mSourceFile
-                      << "targets" << it->second->targets.size()
-                      << "usrs" << it->second->usrs.size()
-                      << "symbolNames" << it->second->symbolNames.size()
-                      << "symbols" << it->second->symbols.size()
-                      << "tokens" << it->second->tokens.size();
-            continue;
-        }
-        if (it->first == fileId) {
-            self = it;
-        } else if (!process(it)) {
-            return false;
-        }
-    }
+    Path databasePath = RTags::encodeDatabaseFilePath(mDataDir, mProject);
+    try {
+        databasePtr.reset(new TableDatabase(databasePath, false));
 
-    if (self != mUnits.end()) {
-        for (const std::shared_ptr<Unit> &t : templateSpecializationTargets) {
-            self->second->targets.unite(t->targets);
+        List<std::shared_ptr<Unit> > templateSpecializationTargets;
+        auto self = mUnits.end();
+        for (auto it = mUnits.begin(); it != mUnits.end(); ++it) {
+            if (!(mIndexDataMessage.files().value(it->first) & IndexDataMessage::Visited)) {
+                ::error() << "Wanting to write something for"
+                          << it->first << Location::path(it->first)
+                          << "but we didn't visit it" << mSourceFile
+                          << "targets" << it->second->targets.size()
+                          << "usrs" << it->second->usrs.size()
+                          << "symbolNames" << it->second->symbolNames.size()
+                          << "symbols" << it->second->symbols.size()
+                          << "tokens" << it->second->tokens.size();
+                continue;
+            }
+            if (it->first == fileId) {
+                self = it;
+            } else if (!process(it)) {
+                return false;
+            }
         }
-        if (!process(self)) {
-            return false;
+
+        if (self != mUnits.end()) {
+            for (const std::shared_ptr<Unit> &t : templateSpecializationTargets) {
+                self->second->targets.unite(t->targets);
+            }
+            if (!process(self)) {
+                return false;
+            }
         }
+
+    } catch (TableDatabaseException &e) {
+        ::error() << __FILE__ << ':' << __LINE__ << "."
+                  << "Database error" << "path:" << databasePath << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+        return false;
     }
     String sourceRoot = root;
     sourceRoot << fileId;

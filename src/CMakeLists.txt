@@ -61,6 +61,10 @@ if (NOT DEFINED LIBCLANG_LIBRARIES OR NOT DEFINED LIBCLANG_CXXFLAGS OR NOT DEFIN
 endif ()
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${LIBCLANG_CXXFLAGS}")
 
+set(SQLITECPP_RUN_CPPLINT OFF CACHE BOOL "Run cpplint.py tool for Google C++ StyleGuide.")
+set(SQLITECPP_INTERNAL_SQLITE OFF CACHE BOOL "Add the internal SQLite3 source to the project.")
+add_subdirectory(SQLiteCpp)
+
 if (NOT RTAGS_BUILD_CLANG)
     set(LIBCLANG_COMPILE_TEST "
 #include <clang-c/Index.h>
@@ -165,6 +169,7 @@ set(RTAGS_SOURCES
     Symbol.cpp
     Symbol.cpp
     SymbolInfoJob.cpp
+    TableDatabase.cpp
     Token.cpp
     TokensJob.cpp
     ${RCT_SOURCES})
@@ -180,6 +185,7 @@ endif ()
 if (LUA_ENABLED)
     add_dependencies(rtags lua)
 endif ()
+target_link_libraries(rtags SQLiteCpp sqlite3)
 
 if (RTAGS_COTIRE)
     include(cotire)
@@ -202,7 +208,7 @@ else ()
     set(END_GROUP "-Wl,--end-group")
 endif ()
 
-set(RTAGS_LIBRARIES rtags ${START_GROUP} ${LIBCLANG_LIBRARIES} ${END_GROUP})
+set(RTAGS_LIBRARIES rtags ${START_GROUP} SQLiteCpp ${LIBCLANG_LIBRARIES} ${END_GROUP})
 if (LUA_ENABLED)
     list(APPEND RTAGS_LIBRARIES -L${CMAKE_CURRENT_BINARY_DIR}/lua-prefix/src/lua-build/ liblua.a)
     add_definitions(-DRTAGS_HAS_LUA)

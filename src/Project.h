@@ -34,6 +34,7 @@
 #include "rct/Serializer.h"
 #include "RTags.h"
 #include "Token.h"
+#include "TableDatabase.h"
 
 class Connection;
 class Dirty;
@@ -86,6 +87,7 @@ public:
         Usrs,
         Tokens
     };
+    static const int NFileMapTypes = 5;
     static const char *fileMapName(FileMapType type)
     {
         switch (type) {
@@ -132,6 +134,7 @@ public:
     };
 
     Set<uint32_t> dependencies(uint32_t fileId, DependencyMode mode) const;
+    Set<uint32_t> dependenciesByUsr(String usr, uint32_t fileId, DependencyMode mode) const;
     bool dependsOn(uint32_t source, uint32_t header) const;
     String dumpDependencies(uint32_t fileId,
                             const List<String> &args = List<String>(),
@@ -249,7 +252,7 @@ public:
     void fixPCH(Source &source);
     void includeCompletions(Flags<QueryMessage::Flag> flags, const std::shared_ptr<Connection> &conn, Source &&source) const;
     size_t bytesWritten() const { return mBytesWritten; }
-    void destroy() { mSaveDirty = false; }
+    void destroy();
     enum VisitResult {
         Stop,
         Continue,
@@ -275,6 +278,8 @@ public:
     void forEachSource(std::function<VisitResult(Source &source)> cb) { forEachSource(mIndexParseData, cb); }
     void validateAll();
     void updateDiagnostics(uint32_t fileId, const Diagnostics &diagnostics);
+
+    std::unique_ptr<TableDatabase> mProjectDatabase;
 private:
     void reloadCompileCommands();
     void onFileAddedOrModified(const Path &path);
@@ -407,7 +412,7 @@ private:
 
     std::shared_ptr<FileMapScope> mFileMapScope;
 
-    const Path mPath, mProjectDataDir;
+    const Path mPath, mProjectDataDir, mDatabasePath;
     Path mProjectFilePath, mSourcesFilePath;
 
     Files mFiles;

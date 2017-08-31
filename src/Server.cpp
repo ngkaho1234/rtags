@@ -1370,12 +1370,12 @@ void Server::preprocessFile(const std::shared_ptr<QueryMessage> &query, const st
 
 void Server::clearProjects(ClearMode mode)
 {
-    Path::rmdir(mOptions.dataDir);
     setCurrentProject(std::shared_ptr<Project>());
     for (auto p : mProjects) {
         p.second->destroy();
     }
     mProjects.clear();
+    Path::rmdir(mOptions.dataDir);
     if (mode == Clear_All)
         Location::init(Hash<Path, uint32_t>());
 }

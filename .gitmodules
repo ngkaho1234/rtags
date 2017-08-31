@@ -1,7 +1,7 @@
 [submodule "src/rct"]
-        path = src/rct
-        url = https://github.com/Andersbakken/rct
-        branch = master
+	path = src/rct
+	url = https://github.com/Andersbakken/rct
+	branch = add-blob-type
 [submodule "src/selene"]
 	path = src/selene
 	url = https://github.com/jeremyong/Selene.git
@@ -10,3 +10,7 @@
 	path = src/lua
 	url = https://github.com/LuaDist/lua.git
     branch = master
+[submodule "src/SQLiteCpp"]
+	path = src/SQLiteCpp
+	url = https://github.com/ngkaho1234/SQLiteCpp
+	branch = WAL
