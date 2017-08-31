@@ -2067,6 +2067,7 @@ bool ClangIndexer::writeFiles(const Path &root, String &error)
             return false;
         }
     }
+
     String sourceRoot = root;
     sourceRoot << fileId;
     Path::mkdir(sourceRoot, Path::Recursive);

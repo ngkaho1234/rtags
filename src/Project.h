@@ -18,17 +18,14 @@
 
 #include <cstdint>
 #include <mutex>
-#include <leveldb/db.h>
-#include <leveldb/write_batch.h>
-#include <leveldb/comparator.h>
 
-#include "Blob.h"
 #include "Diagnostic.h"
 #include "FileMap.h"
 #include "IndexerJob.h"
 #include "IndexMessage.h"
 #include "QueryMessage.h"
 #include "IndexParseData.h"
+#include "rct/Blob.h"
 #include "rct/EmbeddedLinkedList.h"
 #include "rct/FileSystemWatcher.h"
 #include "rct/Flags.h"
@@ -38,6 +35,7 @@
 #include "rct/Serializer.h"
 #include "RTags.h"
 #include "Token.h"
+#include "TableDatabase.h"
 
 class Connection;
 class Dirty;
@@ -70,79 +68,6 @@ struct DependencyNode
 
 RCT_FLAGS(DependencyNode::Flag);
 
-class projectDBComparator : public leveldb::Comparator {
-public:
-    const char* Name() const { return "symNamesDBComparator"; }
-
-    void FindShortestSeparator(std::string*, const leveldb::Slice&) const {}
-    void FindShortSuccessor(std::string*) const {}
-
-    int Compare(const leveldb::Slice& s1, const leveldb::Slice& s2) const;
-};
-
-class DatabaseEntry {
-private:
-    int fileMapType_;
-    Blob key_;
-    Blob value_;
-    Blob entry_;
-
-    //
-    // Layout: (The fields are native encoding)
-    // +---------------+------------------------+-----+--------------------------+-------+
-    // | File Map Type | length of key (size_t) | Key | length of value (size_t) | Value |
-    // +---------------+------------------------+-----+--------------------------+-------+
-    //
-
-public:
-    int fileMapType() const
-    {
-        return fileMapType_;
-    }
-
-    const Blob &key() const
-    {
-        return key_;
-    }
-
-    const Blob &value() const
-    {
-        return value_;
-    }
-
-    const Blob &entry() const
-    {
-        return entry_;
-    }
-
-    operator leveldb::Slice() const
-    {
-        return leveldb::Slice(entry_.data(), entry_.size());
-    }
-
-    void assign(int fileMapType, const Blob &key, const Blob &value)
-    {
-        fileMapType_ = fileMapType;
-        key_ = key;
-        value_ = value;
-        entry_.clear();
-
-        Serializer entrySerializer = getBlobSerializer(entry_);
-        entrySerializer << fileMapType;
-        entrySerializer << key;
-        entrySerializer << value;
-    }
-
-    void assign(const Blob &entry)
-    {
-        Deserializer entryDeserializer = getBlobDeserializer(entry);
-        entryDeserializer >> fileMapType_;
-        entryDeserializer >> key_;
-        entryDeserializer >> value_;
-        entry_ = entry;
-    }
-};
-
 class Project : public std::enable_shared_from_this<Project>
 {
 public:
@@ -155,50 +80,31 @@ public:
     Path path() const { return mPath; }
     bool match(const Match &match, bool *indexed = 0) const;
 
-    enum FileMapType {
-        Symbols,
-        SymbolNames,
-        Targets,
-        Usrs,
-        Tokens
-    };
-    static const int NFileMapTypes = 5;
-    static const char *fileMapName(FileMapType type)
-    {
-        switch (type) {
-        case Symbols: return "symbols";
-        case SymbolNames: return "symnames";
-        case Targets: return "targets";
-        case Usrs: return "usrs";
-        case Tokens: return "tokens";
-        }
-        return 0;
-    }
     std::shared_ptr<FileMap<String, Set<Location> > > openSymbolNames(uint32_t fileId, String *err = 0)
     {
         assert(mFileMapScope);
-        return mFileMapScope->openFileMap<String, Set<Location> >(SymbolNames, fileId, mFileMapScope->symbolNames, err);
+        return mFileMapScope->openFileMap<String, Set<Location> >(TableDatabase::SymbolNames, fileId, mFileMapScope->symbolNames, err);
     }
     std::shared_ptr<FileMap<Location, Symbol> > openSymbols(uint32_t fileId, String *err = 0)
     {
         assert(mFileMapScope);
-        return mFileMapScope->openFileMap<Location, Symbol>(Symbols, fileId, mFileMapScope->symbols, err);
+        return mFileMapScope->openFileMap<Location, Symbol>(TableDatabase::Symbols, fileId, mFileMapScope->symbols, err);
     }
     std::shared_ptr<FileMap<String, Set<Location> > > openTargets(uint32_t fileId, String *err = 0)
     {
         assert(mFileMapScope);
-        return mFileMapScope->openFileMap<String, Set<Location> >(Targets, fileId, mFileMapScope->targets, err);
+        return mFileMapScope->openFileMap<String, Set<Location> >(TableDatabase::Targets, fileId, mFileMapScope->targets, err);
     }
     std::shared_ptr<FileMap<String, Set<Location> > > openUsrs(uint32_t fileId, String *err = 0)
     {
         assert(mFileMapScope);
-        return mFileMapScope->openFileMap<String, Set<Location> >(Usrs, fileId, mFileMapScope->usrs, err);
+        return mFileMapScope->openFileMap<String, Set<Location> >(TableDatabase::Usrs, fileId, mFileMapScope->usrs, err);
     }
 
     std::shared_ptr<FileMap<uint32_t, Token> > openTokens(uint32_t fileId, String *err = 0)
     {
         assert(mFileMapScope);
-        return mFileMapScope->openFileMap<uint32_t, Token>(Tokens, fileId, mFileMapScope->tokens, err);
+        return mFileMapScope->openFileMap<uint32_t, Token>(TableDatabase::Tokens, fileId, mFileMapScope->tokens, err);
     }
 
 
@@ -353,23 +259,8 @@ public:
     void forEachSource(std::function<VisitResult(Source &source)> cb) { forEachSource(mIndexParseData, cb); }
     void validateAll();
 
-    enum DbFindType {
-        DbFindExact,
-        DbFindStartWith
-    };
-    enum DbFindResult {
-        DbFindContinue,
-        DbFindStop
-    };
-    void dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const Blob &key,
-                const std::function<DbFindResult(const DatabaseEntry &entry)> &iterfunc) const;
+    std::unique_ptr<TableDatabase> mProjectDatabase;
 private:
-    void dbRemoveSymbolNames(uint32_t fileId);
-    void dbRemoveUsrs(uint32_t fileId);
-    void dbRemoveTargets(uint32_t fileId);
-    void dbAddSymbolNames(uint32_t fileId);
-    void dbAddUsrs(uint32_t fileId);
-    void dbAddTargets(uint32_t fileId);
     void reloadCompileCommands();
     void onFileAddedOrModified(const Path &path);
     void watchFile(uint32_t fileId);
@@ -401,7 +292,7 @@ private:
         }
 
         struct LRUKey {
-            FileMapType type;
+            TableDatabase::FileMapType type;
             uint32_t fileId;
             bool operator<(const LRUKey &other) const
             {
@@ -409,7 +300,7 @@ private:
             }
         };
         struct LRUEntry {
-            LRUEntry(FileMapType t, uint32_t f)
+            LRUEntry(TableDatabase::FileMapType t, uint32_t f)
                 : key({ t, f })
             {}
             const LRUKey key;
@@ -417,7 +308,7 @@ private:
             std::shared_ptr<LRUEntry> next, prev;
         };
 
-        void poke(FileMapType t, uint32_t f)
+        void poke(TableDatabase::FileMapType t, uint32_t f)
         {
             const LRUKey key = { t, f };
             auto ptr = entryMap.value(key);
@@ -427,7 +318,7 @@ private:
         }
 
         template <typename Key, typename Value>
-        std::shared_ptr<FileMap<Key, Value> > openFileMap(FileMapType type, uint32_t fileId,
+        std::shared_ptr<FileMap<Key, Value> > openFileMap(TableDatabase::FileMapType type, uint32_t fileId,
                                                           Hash<uint32_t, std::shared_ptr<FileMap<Key, Value> > > &cache,
                                                           String *errPtr)
         {
@@ -436,7 +327,7 @@ private:
                 poke(type, fileId);
                 return it->second;
             }
-            const Path path = project->sourceFilePath(fileId, Project::fileMapName(type));
+            const Path path = project->sourceFilePath(fileId, TableDatabase::fileMapName(type));
             auto fileMap = std::make_shared<FileMap<Key, Value>>();
             String err;
             if (fileMap->load(path, project->fileMapOptions(), &err)) {
@@ -450,23 +341,23 @@ private:
                     assert(e);
                     entryMap.remove(e->key);
                     switch (e->key.type) {
-                    case SymbolNames:
+                    case TableDatabase::SymbolNames:
                         assert(symbolNames.contains(e->key.fileId));
                         symbolNames.remove(e->key.fileId);
                         break;
-                    case Symbols:
+                    case TableDatabase::Symbols:
                         assert(symbols.contains(e->key.fileId));
                         symbols.remove(e->key.fileId);
                         break;
-                    case Targets:
+                    case TableDatabase::Targets:
                         assert(targets.contains(e->key.fileId));
                         targets.remove(e->key.fileId);
                         break;
-                    case Usrs:
+                    case TableDatabase::Usrs:
                         assert(usrs.contains(e->key.fileId));
                         usrs.remove(e->key.fileId);
                         break;
-                    case Tokens:
+                    case TableDatabase::Tokens:
                         assert(tokens.contains(e->key.fileId));
                         tokens.remove(e->key.fileId);
                         break;
@@ -530,78 +421,6 @@ private:
     bool mSaveDirty;
 
     mutable std::mutex mMutex;
-
-    std::unique_ptr<leveldb::DB> mProjectDB;
-    projectDBComparator mProjectDBComparator;
-
-    template <typename Value, FileMapType fileMapType> void dbAdd(uint32_t fileId)
-    {
-        leveldb::WriteBatch writeBatch;
-        FileMap<String, Value> datafile;
-        Path path = sourceFilePath(fileId, fileMapName(fileMapType));
-        const int reverseFileMapType = -fileMapType;
-
-        if (!datafile.load(path, fileMapOptions()))
-            return;
-
-        const int cnt = datafile.count();
-
-        for (int i = 0; i < cnt; ++i) {
-            Blob keyBlob, valueBlob;
-            DatabaseEntry entry, reverseEntry;
-            Serializer valueSerializer = getBlobSerializer(valueBlob);
-
-            //
-            // Insertion of mapping to key-value store
-            //
-            String &&key = datafile.keyAt(i);
-            keyBlob.assign(key.data(), key.size());
-            valueSerializer << fileId;
-
-            entry.assign(fileMapType, keyBlob, valueBlob);
-            reverseEntry.assign(reverseFileMapType, valueBlob, keyBlob);
-
-            writeBatch.Put(entry, leveldb::Slice());
-            writeBatch.Put(reverseEntry, leveldb::Slice());
-        }
-
-        leveldb::Status status = mProjectDB->Write(leveldb::WriteOptions(), &writeBatch);
-        if (!status.ok())
-            error() << "Failed addition WriteBatch:" << status.ToString();
-    }
-
-    template <typename Value, FileMapType fileMapType> void dbRemove(uint32_t fileId)
-    {
-        DatabaseEntry reverseEntryFrom;
-        leveldb::WriteBatch writeBatch;
-        std::unique_ptr<leveldb::Iterator>dbIt(mProjectDB->NewIterator(leveldb::ReadOptions()));
-        Blob fileIdBlob;
-        Serializer fileIdSerializer = getBlobSerializer(fileIdBlob);
-        const int reverseFileMapType = -fileMapType;
-
-        fileIdSerializer << fileId;
-        reverseEntryFrom.assign(reverseFileMapType, fileIdBlob, Blob());
-        leveldb::Slice slicefrom(reverseEntryFrom);
-
-        for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
-            DatabaseEntry entry, reverseEntry;
-            leveldb::Slice slice = dbIt->key();
-
-            reverseEntry.assign(Blob(slice.data(), slice.size()));
-            entry.assign(fileMapType, reverseEntry.value(), reverseEntry.key());
-            if (reverseFileMapType != reverseEntry.fileMapType())
-                break;
-            if (fileIdBlob.compare(reverseEntry.key()))
-                break;
-
-            writeBatch.Delete(entry);
-            writeBatch.Delete(reverseEntry);
-        }
-
-        leveldb::Status status = mProjectDB->Write(leveldb::WriteOptions(), &writeBatch);
-        if (!status.ok())
-            error() << "Failed removal WriteBatch:" << status.ToString();
-    }
 };
 
 RCT_FLAGS(Project::WatchMode);

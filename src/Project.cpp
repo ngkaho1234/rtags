@@ -326,41 +326,10 @@ bool Project::readSources(const Path &path, IndexParseData &data, String *err)
     return true;
 }
 
-void Project::dbFind(Project::FileMapType fileMapType, Project::DbFindType matchType, const Blob &key,
-                     const std::function<DbFindResult(const DatabaseEntry &entry)> &iterfunc) const
-{
-    std::unique_ptr<leveldb::Iterator> dbIt(mProjectDB->NewIterator(leveldb::ReadOptions()));
-    DatabaseEntry entryFrom;
-
-    entryFrom.assign(fileMapType, key, Blob());
-    leveldb::Slice slicefrom(entryFrom);
-
-    for (dbIt->Seek(slicefrom); dbIt->Valid(); dbIt->Next()) {
-        DatabaseEntry entry;
-        leveldb::Slice slice = dbIt->key();
-
-        entry.assign(Blob(slice.data(), slice.size()));
-
-        if (fileMapType != entry.fileMapType())
-            break;
-
-        if (matchType == Project::DbFindExact) {
-            if (entry.key().compare(key))
-                break;
-        } else if (matchType == Project::DbFindStartWith) {
-            if (!entry.key().startsWith(key))
-                break;
-        }
-
-        DbFindResult result = iterfunc(entry);
-        if (result == DbFindStop)
-            break;
-    }
-}
-
 bool Project::init()
 {
-    const Path databaseBasePath = mSourceFilePathBase + "ProjectDB";
+    const Path databasePath = mSourceFilePathBase + "TableDatabase.db";
+    const Path databaseEnvPath = mSourceFilePathBase + "TableDatabaseEnv";
     const JobScheduler::JobScope scope(Server::instance()->jobScheduler());
     const Server::Options &options = Server::instance()->options();
     if (!(options.options & Server::NoFileSystemWatch)) {
@@ -374,21 +343,21 @@ bool Project::init()
         mWatcher.added().connect([this](const Path &path) { if (mWatchedPaths.value(path.parentDir()) & Watch_FileManager) mFileManager->onFileAdded(path); });
     }
 
-    Path::mkdir(databaseBasePath, Path::Recursive);
+    Path::mkdir(databaseEnvPath, Path::Recursive);
 
-    leveldb::Options dbOptions;
-    leveldb::DB *db;
-    dbOptions.comparator = &mProjectDBComparator;
-    dbOptions.create_if_missing = true;
-    const Path databasePath = databaseBasePath;
-    leveldb::Status status = leveldb::DB::Open(dbOptions,
-                                               databasePath.constData(),
-                                               &db);
-    if (!status.ok()) {
-        error("Cannot open database %s: %s", databasePath.c_str(), status.ToString().c_str());
+    try {
+        mProjectDatabase.reset(new TableDatabase(databaseEnvPath));
+        int rc = mProjectDatabase->open(databasePath);
+        if (rc) {
+            error("%s:%u. Database error. Database path: \"%s\" Code: %d",
+                  __FILE__, __LINE__, databasePath.c_str(), rc);
+            return false;
+        }
+    } catch (TableDatabaseException &e) {
+        error("%s:%u. Database exception. Database path: \"%s\" Code: %d Reason: %s",
+              __FILE__, __LINE__, databasePath.c_str(), e.getErrorCode(), e.getErrorStr().c_str());
         return false;
     }
-    mProjectDB.reset(db);
 
     mDirtyTimer.timeout().connect(std::bind(&Project::onDirtyTimeout, this, std::placeholders::_1));
     mReloadCompileCommandsTimer.timeout().connect(std::bind(&Project::reloadCompileCommands, this));
@@ -798,10 +767,38 @@ void Project::onJobFinished(const std::shared_ptr<IndexerJob> &job, const std::s
         forEachSources([this, &msg, fileId](Sources &sources) -> VisitResult {
                 // error() << "finished with" << Location::path(fileId) << sources.contains(fileId) << msg->parseTime();
                 if (sources.contains(fileId)) {
+                    [&]() {
+                        Path symbolsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Symbols));
+                        Path symbolNamesPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::SymbolNames));
+                        Path targetsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Targets));
+                        Path usrsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Usrs));
+                        Path tokensPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Tokens));
+                        FileMap<Location, Symbol> symbolsFileMap;
+                        FileMap<String, Set<Location> > symbolNamesFileMap, targetsFileMap, usrsFileMap;
+                        FileMap<uint32_t, Token> tokensFileMap;
+                        if (!symbolsFileMap.load(symbolsPath, fileMapOptions()))
+                            return;
+                        if (!symbolNamesFileMap.load(symbolNamesPath, fileMapOptions()))
+                            return;
+                        if (!targetsFileMap.load(targetsPath, fileMapOptions()))
+                            return;
+                        if (!usrsFileMap.load(usrsPath, fileMapOptions()))
+                            return;
+                        if (!tokensFileMap.load(tokensPath, fileMapOptions()))
+                            return;
+
+                        TableDatabase::UpdateUnitArgs updArgs;
+                        updArgs.symbols = &symbolsFileMap;
+                        updArgs.symbolNames = &symbolNamesFileMap;
+                        updArgs.targets = &targetsFileMap;
+                        updArgs.usrs = &usrsFileMap;
+                        updArgs.tokens = &tokensFileMap;
+                        int rc = mProjectDatabase->updateUnit(fileId, updArgs);
+                        if (rc)
+                            error() << __FILE__ << ':' << __LINE__ << "."
+                                    << "Database error" << "code:" << rc;
+                    }();
                     sources[fileId].parsed = msg->parseTime();
-                    dbAddSymbolNames(fileId);
-                    dbAddUsrs(fileId);
-                    dbAddTargets(fileId);
                 }
                 return Continue;
             });
@@ -939,10 +936,6 @@ void Project::index(const std::shared_ptr<IndexerJob> &job)
         mTimer.start();
     }
 
-    // Remove records from database for a fileID
-    dbRemoveSymbolNames(job->fileId());
-    dbRemoveUsrs(job->fileId());
-
     Server::instance()->jobScheduler()->add(job);
 }
 
@@ -1066,14 +1059,19 @@ Set<uint32_t> Project::dependenciesByUsr(String usr, uint32_t fileId, Dependency
     if (mode != All)
         return dependencies(fileId, mode);
 
-    auto iterfunc = [&ret](const DatabaseEntry &entry)->DbFindResult {
-        uint32_t valueFileId;
-        Deserializer valueDeserializer = getBlobDeserializer(entry.value());
-        valueDeserializer >> valueFileId;
-        ret.insert(valueFileId);
-        return DbFindContinue;
+    auto iterfunc = [&ret](uint32_t entryFileId, const String &, const Set<Location> &) -> TableDatabase::QueryResult {
+        ret.insert(entryFileId);
+        return TableDatabase::Continue;
     };
-    dbFind(Usrs, DbFindExact, Blob(usr.data(), usr.size()), iterfunc);
+    try {
+        int rc = mProjectDatabase->queryUsrs(usr, false, iterfunc);
+        if (rc)
+            error() << __FILE__ << ':' << __LINE__ << "."
+                    << "Database error" << "code:" << rc;
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database exception" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+    }
     return ret;
 }
 
@@ -1410,64 +1408,45 @@ void Project::findSymbols(const String &unencoded,
         lowerBound = string;
     }
 
-    auto processFile = [this, &lowerBound, &string, wildcard, regex, &rx, cs, &inserter](uint32_t file) {
-        auto symNames = openSymbolNames(file);
-        if (!symNames)
-            return;
-        const int count = symNames->count();
-        // error() << "Looking at" << count << Location::path(dep.first)
-        //         << lowerBound << string;
-        uint32_t idx = 0;
-        if (!lowerBound.isEmpty()) {
-            idx = symNames->lowerBound(lowerBound);
-            if (idx == std::numeric_limits<uint32_t>::max()) {
-                return;
-            }
-        }
-
-        for (int i=idx; i<count; ++i) {
-            const String entry = symNames->keyAt(i);
-            // error() << i << count << entry;
-            SymbolMatchType type = Exact;
-            if (!string.isEmpty()) {
-                if (wildcard) {
-                    if (!Rct::wildCmp(string.constData(), entry.constData(), cs)) {
-                        continue;
-                    }
-                    type = Wildcard;
-                } else if (regex) {
-                    if (!std::regex_search(entry.ref(), rx)) {
-                        continue;
-                    }
-                    type = Regexp;
-                } else if (!entry.startsWith(string, cs)) {
-                    if (cs == String::CaseInsensitive) {
-                        continue;
-                    } else {
-                        break;
-                    }
-                } else if (entry.size() != string.size()) {
-                    type = StartsWith;
+    auto iterfunc = [&](uint32_t, const String &key, const Set<Location> &value) -> TableDatabase::QueryResult {
+        SymbolMatchType type = Exact;
+        if (!string.isEmpty()) {
+            if (wildcard) {
+                if (!Rct::wildCmp(string.constData(), key.constData(), cs)) {
+                    return TableDatabase::Continue;
                 }
+                type = Wildcard;
+            } else if (regex) {
+                if (!std::regex_search(key.ref(), rx)) {
+                    return TableDatabase::Continue;
+                }
+                type = Regexp;
+            } else if (!key.startsWith(string, cs)) {
+                if (cs == String::CaseInsensitive) {
+                    return TableDatabase::Continue;
+                } else {
+                    return TableDatabase::Stop;
+                }
+            } else if (key.size() != string.size()) {
+                type = StartsWith;
             }
-            inserter(type, entry, symNames->valueAt(i));
         }
+        inserter(type, key, value);
+        return TableDatabase::Continue;
     };
 
-    if (fileFilter) {
-        processFile(fileFilter);
-    } else {
-        auto iterfunc = [&processFile](const DatabaseEntry &entry)->DbFindResult {
-            uint32_t valueFileId;
-            Deserializer valueDeserializer = getBlobDeserializer(entry.value());
-            valueDeserializer >> valueFileId;
-            processFile(valueFileId);
-            return DbFindContinue;
-        };
-        if (!caseInsensitive && !regex)
-            dbFind(SymbolNames, DbFindStartWith, Blob(string.data(), string.size()), iterfunc);
+    try {
+        int rc;
+        if (fileFilter)
+            rc = mProjectDatabase->querySymbolNames(fileFilter, lowerBound, true, iterfunc);
         else
-            dbFind(SymbolNames, DbFindStartWith, Blob(), iterfunc);
+            rc = mProjectDatabase->querySymbolNames(lowerBound, true, iterfunc);
+        if (rc)
+            error() << __FILE__ << ':' << __LINE__ << "."
+                    << "Database error" << "code:" << rc;
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database exception" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
     }
 }
 
@@ -1736,14 +1715,19 @@ static Set<Symbol> findReferences(const Set<Symbol> &inputs,
 
         if (ret.isEmpty()) {
             const String tusr = Sandbox::encoded(input.usr);
-            auto iterfunc = [&process](const DatabaseEntry &entry)->Project::DbFindResult {
-                uint32_t valueFileId;
-                Deserializer valueDeserializer = getBlobDeserializer(entry.value());
-                valueDeserializer >> valueFileId;
-                process(valueFileId);
-                return Project::DbFindContinue;
+            auto iterfunc = [&process](uint32_t fileId, const String &, const Set<Location> &) -> TableDatabase::QueryResult {
+                process(fileId);
+                return TableDatabase::Continue;
             };
-            project->dbFind(Project::Targets, Project::DbFindExact, Blob(tusr.data(), tusr.size()), iterfunc);
+            try {
+                int rc = project->mProjectDatabase->queryUsrs(tusr, false, iterfunc);
+                if (rc)
+                    error() << __FILE__ << ':' << __LINE__ << "."
+                            << "Database error" << "code:" << rc;
+            } catch (TableDatabaseException &e) {
+                error() << __FILE__ << ':' << __LINE__ << "."
+                        << "Database exception" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+            }
         }
     }
     return ret;
@@ -2106,25 +2090,25 @@ bool Project::validate(uint32_t fileId, ValidateMode mode, String *err) const
         String error;
         const uint32_t opts = fileMapOptions();
         {
-            path = sourceFilePath(fileId, fileMapName(SymbolNames));
+            path = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::SymbolNames));
             FileMap<String, Set<Location> > fileMap;
             if (!fileMap.load(path, opts, &error))
                 goto error;
         }
         {
-            path = sourceFilePath(fileId, fileMapName(Symbols));
+            path = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Symbols));
             FileMap<Location, Symbol> fileMap;
             if (!fileMap.load(path, opts, &error))
                 goto error;
         }
         {
-            path = sourceFilePath(fileId, fileMapName(Targets));
+            path = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Targets));
             FileMap<String, Set<Location> > fileMap;
             if (!fileMap.load(path, opts, &error))
                 goto error;
         }
         {
-            path = sourceFilePath(fileId, fileMapName(Usrs));
+            path = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Usrs));
             FileMap<String, Set<Location> > fileMap;
             if (!fileMap.load(path, opts, &error))
                 goto error;
@@ -2136,8 +2120,8 @@ bool Project::validate(uint32_t fileId, ValidateMode mode, String *err) const
         return false;
     } else {
         assert(mode == StatOnly);
-        for (auto type : { Symbols, SymbolNames, Targets, Usrs }) {
-            const Path p = sourceFilePath(fileId, fileMapName(type));
+        for (auto type : { TableDatabase::Symbols, TableDatabase::SymbolNames, TableDatabase::Targets, TableDatabase::Usrs }) {
+            const Path p = sourceFilePath(fileId, TableDatabase::fileMapName(type));
             if (!p.isFile()) {
                 Log(err) << "Error during validation:" << Location::path(fileId) << p << "doesn't exist";
                 return false;
@@ -2852,68 +2836,6 @@ void Project::forEachSource(IndexParseData &data, std::function<VisitResult(Sour
         });
 }
 
-int projectDBComparator::Compare(const leveldb::Slice& s1, const leveldb::Slice& s2) const
-{
-    DatabaseEntry entry1;
-    DatabaseEntry entry2;
-
-    entry1.assign(Blob(s1.data(), s1.size()));
-    entry2.assign(Blob(s2.data(), s2.size()));
-
-    //
-    // Compare the FileMapType field
-    //
-    if (entry1.fileMapType() < entry2.fileMapType())
-        return -1;
-    if (entry1.fileMapType() > entry2.fileMapType())
-        return 1;
-
-    if (entry1.key().compare(entry2.key()) < 0)
-        return -1;
-    if (entry1.key().compare(entry2.key()) > 0)
-        return 1;
-
-    //
-    // Compare the two values if the two keys are equal
-    //
-    if (entry1.value().compare(entry2.value()) < 0)
-        return -1;
-    if (entry1.value().compare(entry2.value()) > 0)
-        return 1;
-
-    return 0;
-}
-
-void Project::dbAddSymbolNames(uint32_t fileId)
-{
-    dbAdd<Set<Location>, SymbolNames>(fileId);
-}
-
-void Project::dbAddUsrs(uint32_t fileId)
-{
-    dbAdd<Set<Location>, Usrs>(fileId);
-}
-
-void Project::dbAddTargets(uint32_t fileId)
-{
-    dbAdd<Set<Location>, Targets>(fileId);
-}
-
-void Project::dbRemoveSymbolNames(uint32_t fileId)
-{
-    dbRemove<Set<Location>, SymbolNames>(fileId);
-}
-
-void Project::dbRemoveUsrs(uint32_t fileId)
-{
-    dbRemove<Set<Location>, Usrs>(fileId);
-}
-
-void Project::dbRemoveTargets(uint32_t fileId)
-{
-    dbRemove<Set<Location>, Targets>(fileId);
-}
-
 void Project::removeSources(const Hash<uint32_t, uint32_t> &removed)
 {
     for (auto it : removed) {
@@ -2937,9 +2859,15 @@ void Project::removeSource(uint32_t fileId)
     dirty(fileId);
     releaseFileIds(file);
     removeDependencies(fileId);
-    dbRemoveSymbolNames(fileId);
-    dbRemoveUsrs(fileId);
-    dbRemoveTargets(fileId);
+    try{
+        int rc = mProjectDatabase->deleteUnit(fileId);
+        if (rc)
+            error() << __FILE__ << ':' << __LINE__ << "."
+                    << "Database error" << "code:" << rc;
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database exception" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+    }
     Path::rmdir(sourceFilePath(fileId));
 }
 
