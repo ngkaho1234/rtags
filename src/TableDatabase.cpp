@@ -31,6 +31,7 @@ static int TableDatabaseGetSecondary(Db *, const Dbt *key, const Dbt *, Dbt *res
 TableDatabase::TableDatabase(const Path &envPath) try
 {
     mDatabaseEnv.reset(new DbEnv(0));
+    mDatabaseEnv->set_flags(DB_TXN_WRITE_NOSYNC|DB_AUTO_COMMIT, 1);
     mDatabaseEnv->set_lk_max_lockers(10000);
     mDatabaseEnv->open(envPath.c_str(), DB_INIT_LOCK|DB_INIT_MPOOL|DB_INIT_TXN|DB_INIT_LOG|DB_RECOVER|DB_CREATE, 0644);
 } catch (DbException &e) {
@@ -56,13 +57,13 @@ int TableDatabase::open(const Path &dbPath) try
         String secondaryDatabaseName = databaseName + ".secondary";
         mDatabase[type].reset(new Db(mDatabaseEnv.get(), 0));
         ret = mDatabase[type]->open(NULL, dbPath.c_str(), primaryDatabaseName.c_str(), DB_BTREE,
-                                    DB_CREATE|DB_AUTO_COMMIT, TABLEDATABASE_MODE);
+                                    DB_CREATE, TABLEDATABASE_MODE);
         if (ret)
             break;
         mSecondaryDatabase[type].reset(new Db(mDatabaseEnv.get(), 0));
         mSecondaryDatabase[type]->set_flags(DB_DUPSORT);
         ret = mSecondaryDatabase[type]->open(NULL, dbPath.c_str(), secondaryDatabaseName.c_str(), DB_BTREE,
-                                             DB_CREATE|DB_AUTO_COMMIT, TABLEDATABASE_MODE);
+                                             DB_CREATE, TABLEDATABASE_MODE);
         if (ret)
             break;
         ret = mDatabase[type]->associate(NULL, mSecondaryDatabase[type].get(), TableDatabaseGetSecondary, 0);
