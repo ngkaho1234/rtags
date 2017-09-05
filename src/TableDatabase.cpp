@@ -31,6 +31,7 @@ static int TableDatabaseGetSecondary(Db *, const Dbt *key, const Dbt *, Dbt *res
 TableDatabase::TableDatabase(const Path &envPath) try
 {
     mDatabaseEnv.reset(new DbEnv(0));
+    mDatabaseEnv->set_lk_max_lockers(10000);
     mDatabaseEnv->open(envPath.c_str(), DB_INIT_LOCK|DB_INIT_MPOOL|DB_INIT_TXN|DB_INIT_LOG|DB_RECOVER|DB_CREATE, 0644);
 } catch (DbException &e) {
     TableDatabaseException tableDbException(e.get_errno(), e.what());
