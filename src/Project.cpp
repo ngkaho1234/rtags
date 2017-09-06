@@ -793,10 +793,15 @@ void Project::onJobFinished(const std::shared_ptr<IndexerJob> &job, const std::s
                         updArgs.targets = &targetsFileMap;
                         updArgs.usrs = &usrsFileMap;
                         updArgs.tokens = &tokensFileMap;
-                        int rc = mProjectDatabase->updateUnit(fileId, updArgs);
-                        if (rc)
+                        try {
+                            int rc = mProjectDatabase->updateUnit(fileId, updArgs);
+                            if (rc)
+                                error() << __FILE__ << ':' << __LINE__ << "."
+                                        << "Database error" << "code:" << rc;
+                        } catch (TableDatabaseException &e) {
                             error() << __FILE__ << ':' << __LINE__ << "."
-                                    << "Database error" << "code:" << rc;
+                                    << "Database exception" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+                        }
                     }();
                     sources[fileId].parsed = msg->parseTime();
                 }
@@ -2859,7 +2864,7 @@ void Project::removeSource(uint32_t fileId)
     dirty(fileId);
     releaseFileIds(file);
     removeDependencies(fileId);
-    try{
+    try {
         int rc = mProjectDatabase->deleteUnit(fileId);
         if (rc)
             error() << __FILE__ << ':' << __LINE__ << "."
