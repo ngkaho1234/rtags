@@ -31,7 +31,7 @@ static int TableDatabaseGetSecondary(Db *, const Dbt *key, const Dbt *, Dbt *res
 TableDatabase::TableDatabase(const Path &envPath) try
 {
     mDatabaseEnv.reset(new DbEnv(0));
-    mDatabaseEnv->set_flags(DB_TXN_WRITE_NOSYNC|DB_AUTO_COMMIT, 1);
+    mDatabaseEnv->set_flags(DB_TXN_WRITE_NOSYNC, 1);
     mDatabaseEnv->set_lk_max_lockers(100000);
     mDatabaseEnv->open(envPath.c_str(), DB_INIT_LOCK|DB_INIT_MPOOL|DB_INIT_TXN|DB_INIT_LOG|DB_RECOVER|DB_CREATE, 0644);
 } catch (DbException &e) {
@@ -48,39 +48,55 @@ TableDatabase::~TableDatabase()
     mDatabaseEnv.reset();
 }
 
-int TableDatabase::open(const Path &dbPath) try
+int TableDatabase::open(const Path &dbPath)
 {
     int ret = 0;
-    for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
-        String databaseName = fileMapName(type);
-        String primaryDatabaseName = databaseName + ".primary";
-        String secondaryDatabaseName = databaseName + ".secondary";
-        mDatabase[type].reset(new Db(mDatabaseEnv.get(), 0));
-        ret = mDatabase[type]->open(NULL, dbPath.c_str(), primaryDatabaseName.c_str(), DB_BTREE,
-                                    DB_CREATE, TABLEDATABASE_MODE);
-        if (ret)
-            break;
-        mSecondaryDatabase[type].reset(new Db(mDatabaseEnv.get(), 0));
-        mSecondaryDatabase[type]->set_flags(DB_DUPSORT);
-        ret = mSecondaryDatabase[type]->open(NULL, dbPath.c_str(), secondaryDatabaseName.c_str(), DB_BTREE,
-                                             DB_CREATE, TABLEDATABASE_MODE);
-        if (ret)
-            break;
-        ret = mDatabase[type]->associate(NULL, mSecondaryDatabase[type].get(), TableDatabaseGetSecondary, 0);
-        if (ret)
-            break;
-    }
-    // Do cleanup in case of errors.
-    if (ret)
+    DbTxn *txn = NULL;
+
+    try {
+        mDatabaseEnv->txn_begin(NULL, &txn, 0);
+
+        for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
+            String databaseName = fileMapName(type);
+            String primaryDatabaseName = databaseName + ".primary";
+            String secondaryDatabaseName = databaseName + ".secondary";
+            mDatabase[type].reset(new Db(mDatabaseEnv.get(), 0));
+            ret = mDatabase[type]->open(txn, dbPath.c_str(), primaryDatabaseName.c_str(), DB_BTREE,
+                                        DB_CREATE, TABLEDATABASE_MODE);
+            if (ret)
+                goto on_error;
+            mSecondaryDatabase[type].reset(new Db(mDatabaseEnv.get(), 0));
+            mSecondaryDatabase[type]->set_flags(DB_DUPSORT);
+            ret = mSecondaryDatabase[type]->open(txn, dbPath.c_str(), secondaryDatabaseName.c_str(), DB_BTREE,
+                                                 DB_CREATE, TABLEDATABASE_MODE);
+            if (ret)
+                goto on_error;
+            ret = mDatabase[type]->associate(txn, mSecondaryDatabase[type].get(), TableDatabaseGetSecondary, 0);
+            if (ret)
+                goto on_error;
+        }
+
+        txn->commit(0);
+    } catch (DbException &e) {
+        TableDatabaseException tableDbException(e.get_errno(), e.what());
+        if (txn)
+            txn->abort();
+        // Do cleanup in case of errors.
         for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
             mDatabase[type].reset();
             mDatabase[type].reset();
         }
-
+        throw tableDbException;
+    }
+    return 0;
+on_error:
+    txn->abort();
+    // Do cleanup in case of errors.
+    for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
+        mDatabase[type].reset();
+        mDatabase[type].reset();
+    }
     return ret;
-} catch (DbException &e) {
-    TableDatabaseException tableDbException(e.get_errno(), e.what());
-    throw tableDbException;
 }
 
 //
