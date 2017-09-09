@@ -1076,6 +1076,45 @@ void Project::removeDependencies(uint32_t fileId)
     }
 }
 
+void Project::updateDatabase(uint32_t fileId)
+{
+    Path symbolsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Symbols));
+    Path symbolNamesPath = tmpFilePath(fileId, TableDatabase::fileMapName(TableDatabase::SymbolNames));
+    Path targetsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Targets));
+    Path usrsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Usrs));
+    Path tokensPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Tokens));
+    FileMap<Location, Symbol> symbolsFileMap;
+    FileMap<String, Set<Location> > symbolNamesFileMap, targetsFileMap, usrsFileMap;
+    FileMap<uint32_t, Token> tokensFileMap;
+    if (!symbolsFileMap.load(symbolsPath, fileMapOptions()))
+        return;
+    if (!symbolNamesFileMap.load(symbolNamesPath, fileMapOptions()))
+        return;
+    if (!targetsFileMap.load(targetsPath, fileMapOptions()))
+        return;
+    if (!usrsFileMap.load(usrsPath, fileMapOptions()))
+        return;
+    if (!tokensFileMap.load(tokensPath, fileMapOptions()))
+        return;
+
+    TableDatabase::UpdateUnitArgs updArgs;
+    updArgs.symbols = &symbolsFileMap;
+    updArgs.symbolNames = &symbolNamesFileMap;
+    updArgs.targets = &targetsFileMap;
+    updArgs.usrs = &usrsFileMap;
+    updArgs.tokens = &tokensFileMap;
+    try {
+        int rc = mProjectDatabase->updateUnit(fileId, updArgs);
+        if (rc)
+            error() << __FILE__ << ':' << __LINE__ << "."
+                    << "Database error" << "code:" << rc;
+    } catch (TableDatabaseException &e) {
+        error() << __FILE__ << ':' << __LINE__ << "."
+                << "Database exception" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
+    }
+
+}
+
 void Project::updateDependencies(uint32_t fileId, const std::shared_ptr<IndexDataMessage> &msg)
 {
     static_cast<void>(fileId);
@@ -1117,42 +1156,7 @@ void Project::updateDependencies(uint32_t fileId, const std::shared_ptr<IndexDat
                 node->includes.clear();
             }
 
-            [&]() {
-                Path symbolsPath = sourceFilePath(pair.first, TableDatabase::fileMapName(TableDatabase::Symbols));
-                Path symbolNamesPath = tmpFilePath(pair.first, TableDatabase::fileMapName(TableDatabase::SymbolNames));
-                Path targetsPath = sourceFilePath(pair.first, TableDatabase::fileMapName(TableDatabase::Targets));
-                Path usrsPath = sourceFilePath(pair.first, TableDatabase::fileMapName(TableDatabase::Usrs));
-                Path tokensPath = sourceFilePath(pair.first, TableDatabase::fileMapName(TableDatabase::Tokens));
-                FileMap<Location, Symbol> symbolsFileMap;
-                FileMap<String, Set<Location> > symbolNamesFileMap, targetsFileMap, usrsFileMap;
-                FileMap<uint32_t, Token> tokensFileMap;
-                if (!symbolsFileMap.load(symbolsPath, fileMapOptions()))
-                    return;
-                if (!symbolNamesFileMap.load(symbolNamesPath, fileMapOptions()))
-                    return;
-                if (!targetsFileMap.load(targetsPath, fileMapOptions()))
-                    return;
-                if (!usrsFileMap.load(usrsPath, fileMapOptions()))
-                    return;
-                if (!tokensFileMap.load(tokensPath, fileMapOptions()))
-                    return;
-
-                TableDatabase::UpdateUnitArgs updArgs;
-                updArgs.symbols = &symbolsFileMap;
-                updArgs.symbolNames = &symbolNamesFileMap;
-                updArgs.targets = &targetsFileMap;
-                updArgs.usrs = &usrsFileMap;
-                updArgs.tokens = &tokensFileMap;
-                try {
-                    int rc = mProjectDatabase->updateUnit(pair.first, updArgs);
-                    if (rc)
-                        error() << __FILE__ << ':' << __LINE__ << "."
-                                << "Database error" << "code:" << rc;
-                } catch (TableDatabaseException &e) {
-                    error() << __FILE__ << ':' << __LINE__ << "."
-                            << "Database exception" << "code:" << e.getErrorCode() << "reason:" << e.getErrorStr();
-                }
-            }();
+            updateDatabase(pair.first);
         }
 
         Path::rmdir(tmpFilePath(pair.first));
