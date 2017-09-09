@@ -266,6 +266,7 @@ Project::Project(const Path &path)
     const Path tmp = options.dataDir + srcPath;
     mProjectFilePath = tmp + "/project";
     mSourcesFilePath = tmp + "/sources";
+    mTmpFilePathBase = RTags::encodeSourceFilePath(options.tmpDataDir, path);
 }
 
 Project::~Project()
@@ -769,7 +770,7 @@ void Project::onJobFinished(const std::shared_ptr<IndexerJob> &job, const std::s
                 if (sources.contains(fileId)) {
                     [&]() {
                         Path symbolsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Symbols));
-                        Path symbolNamesPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::SymbolNames));
+                        Path symbolNamesPath = tmpFilePath(fileId, TableDatabase::fileMapName(TableDatabase::SymbolNames));
                         Path targetsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Targets));
                         Path usrsPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Usrs));
                         Path tokensPath = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Tokens));
@@ -805,6 +806,7 @@ void Project::onJobFinished(const std::shared_ptr<IndexerJob> &job, const std::s
                     }();
                     sources[fileId].parsed = msg->parseTime();
                 }
+                Path::rmdir(tmpFilePath(fileId));
                 return Continue;
             });
         logDirect(LogLevel::Error, String::format("[%3d%%] %d/%d %s %s. (%s)",
@@ -2095,12 +2097,6 @@ bool Project::validate(uint32_t fileId, ValidateMode mode, String *err) const
         String error;
         const uint32_t opts = fileMapOptions();
         {
-            path = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::SymbolNames));
-            FileMap<String, Set<Location> > fileMap;
-            if (!fileMap.load(path, opts, &error))
-                goto error;
-        }
-        {
             path = sourceFilePath(fileId, TableDatabase::fileMapName(TableDatabase::Symbols));
             FileMap<Location, Symbol> fileMap;
             if (!fileMap.load(path, opts, &error))
@@ -2125,7 +2121,7 @@ bool Project::validate(uint32_t fileId, ValidateMode mode, String *err) const
         return false;
     } else {
         assert(mode == StatOnly);
-        for (auto type : { TableDatabase::Symbols, TableDatabase::SymbolNames, TableDatabase::Targets, TableDatabase::Usrs }) {
+        for (auto type : { TableDatabase::Symbols, TableDatabase::Targets, TableDatabase::Usrs }) {
             const Path p = sourceFilePath(fileId, TableDatabase::fileMapName(type));
             if (!p.isFile()) {
                 Log(err) << "Error during validation:" << Location::path(fileId) << p << "doesn't exist";
@@ -2325,7 +2321,6 @@ void Project::prepare(uint32_t fileId)
     if (fileId && isIndexed(fileId)) {
         beginScope();
         String err;
-        openSymbolNames(fileId, &err);
         openSymbols(fileId, &err);
         openTargets(fileId, &err);
         openUsrs(fileId, &err);

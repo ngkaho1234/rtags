@@ -122,6 +122,17 @@ public:
     }
 };
 
+class RemoveTmpDataDir
+{
+    Path mTmpDataDir;
+public:
+    RemoveTmpDataDir(const Path &tmpDataDir) : mTmpDataDir(tmpDataDir) { }
+    ~RemoveTmpDataDir()
+    {
+        Path::rmdir(mTmpDataDir);
+    }
+};
+
 enum OptionType {
     None = 0,
     Help,
@@ -261,6 +272,13 @@ int main(int argc, char** argv)
          serverOpts.dataDir += "/rtags/";
          serverOpts.dataDir.mkdir(Path::Recursive);
     }
+    serverOpts.tmpDataDir = String("/tmp/rtags-XXXXXX");
+    if (!mkdtemp(serverOpts.tmpDataDir.data())) {
+        fprintf(stderr, "Failed to mkdtemp (%d) %s\n", errno, strerror(errno));
+        return 1;
+    }
+    serverOpts.tmpDataDir += '/';
+    RemoveTmpDataDir removeTmpDataDir(serverOpts.tmpDataDir);
     Path logFile;
     Flags<LogFlag> logFlags = DontRotate|LogStderr;
     LogLevel logLevel(LogLevel::Error);

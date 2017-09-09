@@ -183,6 +183,7 @@ String IndexerJob::encode() const
                    << options.options
                    << unsavedFiles
                    << options.dataDir
+                   << options.tmpDataDir
                    << options.debugLocations;
 
         proj->encodeVisitedFiles(serializer);

@@ -100,6 +100,7 @@ public:
         }
 
         Path socketFile, dataDir, argTransform, rp, sandboxRoot;
+        Path tmpDataDir;
         Flags<Option> options;
         size_t jobCount, headerErrorJobCount, maxIncludeCompletionDepth;
         int rpVisitFileTimeout, rpIndexDataMessageTimeout,

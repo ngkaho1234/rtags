@@ -43,7 +43,7 @@ private:
     bool visit();
     bool parse();
     void tokenize(CXFile file, uint32_t fileId, const Path &path);
-    bool writeFiles(const Path &root, String &error);
+    bool writeFiles(const Path &root, const Path &tmpRoot, String &error);
 
     void addFileSymbol(uint32_t file);
     int symbolLength(CXCursorKind kind, const CXCursor &cursor);
@@ -216,6 +216,8 @@ private:
 
     static Flags<Server::Option> sServerOpts;
     static Path sServerSandboxRoot;
+
+    Path mTmpDataDir;
 };
 
 #endif

@@ -158,6 +158,7 @@ public:
     Set<Symbol> findByUsr(const String &usr, uint32_t fileId, DependencyMode mode);
 
     Path sourceFilePath(uint32_t fileId, const char *path = "") const;
+    Path tmpFilePath(uint32_t fileId, const char *path = "") const;
 
     List<RTags::SortedSymbol> sort(const Set<Symbol> &symbols,
                                    Flags<QueryMessage::Flag> flags = Flags<QueryMessage::Flag>());
@@ -394,6 +395,7 @@ private:
 
     const Path mPath, mSourceFilePathBase;
     Path mProjectFilePath, mSourcesFilePath;
+    Path mTmpFilePathBase;
 
     Files mFiles;
 
@@ -457,6 +459,11 @@ inline void Project::releaseFileIds(const Set<uint32_t> &fileIds)
 inline Path Project::sourceFilePath(uint32_t fileId, const char *type) const
 {
     return String::format<1024>("%s%d/%s", mSourceFilePathBase.constData(), fileId, type);
+}
+
+inline Path Project::tmpFilePath(uint32_t fileId, const char *type) const
+{
+    return String::format<1024>("%s%d/%s", mTmpFilePathBase.constData(), fileId, type);
 }
 
 #endif

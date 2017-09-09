@@ -131,6 +131,7 @@ bool ClangIndexer::exec(const String &data)
     deserializer >> sServerOpts;
     deserializer >> mUnsavedFiles;
     deserializer >> mDataDir;
+    deserializer >> mTmpDataDir;
     deserializer >> mDebugLocations;
     deserializer >> blockedFiles;
 
@@ -223,7 +224,8 @@ bool ClangIndexer::exec(const String &data)
             break;
         }
     }
-    if (!hasUnit || !writeFiles(RTags::encodeSourceFilePath(mDataDir, mProject, 0), err)) {
+    if (!hasUnit || !writeFiles(RTags::encodeSourceFilePath(mDataDir, mProject, 0),
+                                RTags::encodeSourceFilePath(mTmpDataDir, mProject, 0), err)) {
         message += " error";
         if (!err.isEmpty())
             message += (' ' + err);
@@ -1950,7 +1952,7 @@ static inline void encodeSymbols(Map<Location, Symbol> &symbols)
     }
 }
 
-bool ClangIndexer::writeFiles(const Path &root, String &error)
+bool ClangIndexer::writeFiles(const Path &root, const Path &tmpRoot, String &error)
 {
     size_t bytesWritten = 0;
     const Path p = Sandbox::encoded(mSourceFile);
@@ -1960,8 +1962,11 @@ bool ClangIndexer::writeFiles(const Path &root, String &error)
     auto process = [&](Hash<uint32_t, std::shared_ptr<Unit> >::const_iterator unit) {
         assert(mIndexDataMessage.files().value(unit->first) & IndexDataMessage::Visited);
         String unitRoot = root;
+        String tmpUnitRoot = tmpRoot;
         unitRoot << unit->first;
+        tmpUnitRoot << unit->first;
         Path::mkdir(unitRoot, Path::Recursive);
+        Path::mkdir(tmpUnitRoot, Path::Recursive);
         const Path path = Location::path(unit->first);
         if (unit->first != fileId) {
             FILE *f = fopen((unitRoot + "/info").constData(), "w");
@@ -2024,7 +2029,7 @@ bool ClangIndexer::writeFiles(const Path &root, String &error)
         }
         bytesWritten += w;
 
-        if (!(w += FileMap<String, Set<Location> >::write(unitRoot + "/symnames", unit->second->symbolNames, fileMapOpts))) {
+        if (!(w += FileMap<String, Set<Location> >::write(tmpUnitRoot + "/symnames", unit->second->symbolNames, fileMapOpts))) {
             error = "Failed to write symbolNames";
             return false;
         }
