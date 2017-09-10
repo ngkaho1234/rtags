@@ -111,8 +111,8 @@ static int TableDatabaseQuery(DbTxn *txn, Db *secondaryDatabase,
 {
     int ret;
     Dbc *cursor;
-    Blob firstKey;
-    Dbt keyDbt, pkeyDbt, valueDbt;
+    Blob firstSkey;
+    Dbt skeyDbt, pkeyDbt, valueDbt;
 
     //
     // Assemble a blob key that is in the format of secondary database's key type
@@ -122,33 +122,33 @@ static int TableDatabaseQuery(DbTxn *txn, Db *secondaryDatabase,
     // NOTE: The key format of the secondary database's key type is simply
     // the primary key type without FileId field.
     //
-    firstKey.append(key);
-    keyDbt.set_data(&firstKey[0]);
-    keyDbt.set_size((u_int32_t)firstKey.size());
+    firstSkey.append(key);
+    skeyDbt.set_data(&firstSkey[0]);
+    skeyDbt.set_size((u_int32_t)firstSkey.size());
 
     // Obtain a database cursor from class Db
     secondaryDatabase->cursor(txn, &cursor, 0);
-    if (!(ret = cursor->pget(&keyDbt, &pkeyDbt, &valueDbt, DB_SET_RANGE))) {
+    if (!(ret = cursor->pget(&skeyDbt, &pkeyDbt, &valueDbt, DB_SET_RANGE))) {
         do {
             // Obtain the full-format key and value from the current entry
-            Blob keyBlob(static_cast<char *>(keyDbt.get_data()), static_cast<uint32_t>(keyDbt.get_size()));
-            Blob pkeyBlob(static_cast<char *>(pkeyDbt.get_data()), static_cast<uint32_t>(pkeyDbt.get_size()));
-            Blob valueBlob(static_cast<char *>(valueDbt.get_data()), static_cast<uint32_t>(valueDbt.get_size()));
+            Blob skeyBlob(static_cast<char *>(skeyDbt.get_data()), skeyDbt.get_size());
+            Blob pkeyBlob(static_cast<char *>(pkeyDbt.get_data()), pkeyDbt.get_size());
+            Blob valueBlob(static_cast<char *>(valueDbt.get_data()), valueDbt.get_size());
 
             // Do a key comparison
             if (isKeyPrefix) {
-                if (!keyBlob.startsWith(firstKey))
+                if (!skeyBlob.startsWith(firstSkey))
                     break;
             } else {
-                if (keyBlob.compare(firstKey))
+                if (skeyBlob.compare(firstSkey))
                     break;
             }
 
             uint32_t fileId = *reinterpret_cast<const uint32_t *>(pkeyBlob.data());
-            TableDatabase::QueryResult queryResult = cb(fileId, keyBlob, valueBlob);
+            TableDatabase::QueryResult queryResult = cb(fileId, skeyBlob, valueBlob);
             if (queryResult == TableDatabase::Stop)
                 break;
-        } while (!(ret = cursor->pget(&keyDbt, &pkeyDbt, &valueDbt, DB_NEXT)));
+        } while (!(ret = cursor->pget(&skeyDbt, &pkeyDbt, &valueDbt, DB_NEXT)));
     }
 
     cursor->close();
@@ -165,39 +165,41 @@ static int TableDatabaseQuery(DbTxn *txn, Db *database,
 {
     int ret;
     Dbc *cursor;
-    Blob firstKey;
-    Dbt keyDbt, valueDbt;
+    Blob firstPkey;
+    Dbt pkeyDbt, valueDbt;
 
     //
     // Assemble a blob key that is in the format of primary database's key type
     // so that it could later be used as prefix/absolute matching by the
     // built-in lexicographical compare function.
     //
-    firstKey.append(reinterpret_cast<char *>(&fileId), sizeof(uint32_t));
-    firstKey.append(key);
-    keyDbt.set_data(&firstKey[0]);
-    keyDbt.set_size((u_int32_t)firstKey.size());
+    firstPkey.append(reinterpret_cast<char *>(&fileId), sizeof(uint32_t));
+    firstPkey.append(key);
+    pkeyDbt.set_data(&firstPkey[0]);
+    pkeyDbt.set_size((u_int32_t)firstPkey.size());
 
     // Obtain a database cursor from class Db
     database->cursor(txn, &cursor, 0);
-    if (!(ret = cursor->get(&keyDbt, &valueDbt, DB_SET_RANGE))) {
+    if (!(ret = cursor->get(&pkeyDbt, &valueDbt, DB_SET_RANGE))) {
         do {
             // Obtain the full-format key and value from the current entry
-            Blob keyBlob(static_cast<char *>(keyDbt.get_data()), static_cast<uint32_t>(keyDbt.get_size()));
-            Blob valueBlob(static_cast<char *>(valueDbt.get_data()), static_cast<uint32_t>(valueDbt.get_size()));
+            Blob pkeyBlob(static_cast<char *>(pkeyDbt.get_data()), pkeyDbt.get_size());
+            Blob valueBlob(static_cast<char *>(valueDbt.get_data()), valueDbt.get_size());
             // Do a key comparison
             if (isKeyPrefix) {
-                if (!keyBlob.startsWith(firstKey))
+                if (!pkeyBlob.startsWith(firstPkey))
                     break;
             } else {
-                if (keyBlob.compare(firstKey))
+                if (pkeyBlob.compare(firstPkey))
                     break;
             }
 
-            TableDatabase::QueryResult queryResult = cb(fileId, keyBlob, valueBlob);
+            // Extract the primary key content without fileId prefix
+            Blob skeyBlob(pkeyBlob.data() + sizeof(uint32_t), pkeyBlob.size() - sizeof(uint32_t));
+            TableDatabase::QueryResult queryResult = cb(fileId, skeyBlob, valueBlob);
             if (queryResult == TableDatabase::Stop)
                 break;
-        } while (!(ret = cursor->get(&keyDbt, &valueDbt, DB_NEXT)));
+        } while (!(ret = cursor->get(&pkeyDbt, &valueDbt, DB_NEXT)));
     }
 
     cursor->close();
@@ -216,33 +218,33 @@ static int TableDatabaseDeleteUnit(DbTxn *txn, Db *database, uint32_t fileId)
 {
     int ret;
     Dbc *cursor;
-    Blob firstKey;
-    Dbt keyDbt, valueDbt;
+    Blob firstPkey;
+    Dbt pkeyDbt, valueDbt;
 
     //
     // Assemble a blob key that is in the format of primary database's key type
     // so that it could later be used as prefix/absolute matching by the
     // built-in lexicographical compare function.
     //
-    firstKey.append(reinterpret_cast<char *>(&fileId), sizeof(uint32_t));
-    keyDbt.set_data(&firstKey[0]);
-    keyDbt.set_size((u_int32_t)firstKey.size());
+    firstPkey.append(reinterpret_cast<char *>(&fileId), sizeof(uint32_t));
+    pkeyDbt.set_data(&firstPkey[0]);
+    pkeyDbt.set_size((u_int32_t)firstPkey.size());
 
     // Obtain a database cursor from class Db
     database->cursor(txn, &cursor, 0);
-    if (!(ret = cursor->get(&keyDbt, &valueDbt, DB_SET_RANGE))) {
+    if (!(ret = cursor->get(&pkeyDbt, &valueDbt, DB_SET_RANGE))) {
         do {
             // Obtain the full-format key and value from the current entry
-            Blob keyBlob(static_cast<char *>(keyDbt.get_data()), static_cast<uint32_t>(keyDbt.get_size()));
+            Blob pkeyBlob(static_cast<char *>(pkeyDbt.get_data()), static_cast<uint32_t>(pkeyDbt.get_size()));
             // Do a key comparison
-            if (!keyBlob.startsWith(firstKey))
+            if (!pkeyBlob.startsWith(firstPkey))
                 break;
 
-            ret = database->del(txn, &keyDbt, 0);
+            ret = database->del(txn, &pkeyDbt, 0);
             if (ret && ret != DB_NOTFOUND)
                 break;
             ret = 0;
-        } while (!(ret = cursor->get(&keyDbt, &valueDbt, DB_NEXT)));
+        } while (!(ret = cursor->get(&pkeyDbt, &valueDbt, DB_NEXT)));
     }
 
     cursor->close();
