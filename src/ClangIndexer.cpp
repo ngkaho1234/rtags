@@ -2017,13 +2017,13 @@ bool ClangIndexer::writeFiles(const Path &root, const Path &tmpRoot, String &err
         }
         bytesWritten += w;
 
-        if (!(w = FileMap<String, Set<Location> >::write(unitRoot + "/targets", convertTargets(unit->second->targets, hasRoot), fileMapOpts))) {
+        if (!(w = FileMap<String, Set<Location> >::write(tmpUnitRoot + "/targets", convertTargets(unit->second->targets, hasRoot), fileMapOpts))) {
             error = "Failed to write targets";
             return false;
         }
         bytesWritten += w;
 
-        if (!(w += FileMap<String, Set<Location> >::write(unitRoot + "/usrs", unit->second->usrs, fileMapOpts))) {
+        if (!(w += FileMap<String, Set<Location> >::write(tmpUnitRoot + "/usrs", unit->second->usrs, fileMapOpts))) {
             error = "Failed to write usrs";
             return false;
         }
