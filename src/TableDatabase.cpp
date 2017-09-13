@@ -371,14 +371,11 @@ int TableDatabase::updateUnit(uint32_t fileId, const UpdateUnitArgs &args)
         ret = DeleteUnitInternal(txn, fileId);
         if (ret)
             goto on_error;
-        {
-            std::list<std::pair<Blob, Blob> > itemList;
-            TableDatabaseMakeItemList(*args.symbols, itemList);
-            ret = TableDatabaseInsert(txn, this->mDatabase[Symbols].get(), fileId, itemList);
-            if (ret)
-                goto on_error;
-        }
 
+        //
+        // Insert entries in datafiles into database.
+        // We currently do not do that for symbols and tokens datafiles
+        //
         {
             std::list<std::pair<Blob, Blob> > itemList;
             TableDatabaseMakeItemList(*args.symbolNames, itemList);
@@ -399,14 +396,6 @@ int TableDatabase::updateUnit(uint32_t fileId, const UpdateUnitArgs &args)
             std::list<std::pair<Blob, Blob> > itemList;
             TableDatabaseMakeItemList(*args.usrs, itemList);
             ret = TableDatabaseInsert(txn, this->mDatabase[Usrs].get(), fileId, itemList);
-            if (ret)
-                goto on_error;
-        }
-
-        {
-            std::list<std::pair<Blob, Blob> > itemList;
-            TableDatabaseMakeItemList(*args.tokens, itemList);
-            ret = TableDatabaseInsert(txn, this->mDatabase[Tokens].get(), fileId, itemList);
             if (ret)
                 goto on_error;
         }
