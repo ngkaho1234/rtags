@@ -4,11 +4,9 @@
 #include "Project.h"
 
 static constexpr auto DatabaseNames = {
-    TableDatabase::Symbols,
     TableDatabase::SymbolNames,
     TableDatabase::Targets,
     TableDatabase::Usrs,
-    TableDatabase::Tokens,
 };
 
 //
