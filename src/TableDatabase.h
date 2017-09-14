@@ -10,6 +10,9 @@
 #include "FileMap.h"
 #include "Token.h"
 
+//
+// Database operation exceptions to be caught by callers (Due to catastrophic errors)
+//
 class TableDatabaseException
 {
 public:
@@ -30,6 +33,9 @@ private:
     String mErrorStr;
 };
 
+//
+// Table Database class
+//
 class TableDatabase {
 public:
     TableDatabase(const Path &envPath);
@@ -74,11 +80,6 @@ public:
     int deleteUnit(uint32_t fileId);
     int updateUnit(uint32_t fileId, const UpdateUnitArgs &args);
 
-    int querySymbols(const Location &keyLocation,
-                     std::function<QueryResult(uint32_t fileId, const Location &key, const Symbol &value)> cb);
-    int querySymbols(uint32_t fileId, const Location &keyLocation,
-                     std::function<QueryResult(uint32_t fileId, const Location &key, const Symbol &value)> cb);
-
     int queryTargets(const String &keyTarget, bool isKeyPrefix,
                      std::function<QueryResult(uint32_t fileId, const String &key, const Set<Location> &value)> cb);
     int queryTargets(uint32_t fileId, const String &keyTarget, bool isKeyPrefix,
@@ -93,11 +94,6 @@ public:
                   std::function<QueryResult(uint32_t fileId, const String &key, const Set<Location> &value)> cb);
     int queryUsrs(uint32_t fileId, const String &keyUsrs, bool isKeyPrefix,
                   std::function<QueryResult(uint32_t fileId, const String &key, const Set<Location> &value)> cb);
-
-    int queryToken(uint32_t keyTokenId,
-                   std::function<QueryResult(uint32_t fileId, uint32_t key, const Token &value)> cb);
-    int queryToken(uint32_t fileId, uint32_t keyTokenId,
-                   std::function<QueryResult(uint32_t fileId, uint32_t key, const Token &value)> cb);
 
 private:
     std::unique_ptr<DbEnv> mDatabaseEnv;

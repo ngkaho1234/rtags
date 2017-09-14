@@ -3,6 +3,14 @@
 #include "TableDatabase.h"
 #include "Project.h"
 
+static constexpr auto DatabaseNames = {
+    TableDatabase::Symbols,
+    TableDatabase::SymbolNames,
+    TableDatabase::Targets,
+    TableDatabase::Usrs,
+    TableDatabase::Tokens,
+};
+
 //
 // The schema of database primary key is as follows:
 // FileID(uint32_t):Blob
@@ -12,7 +20,7 @@
 
 // Set unix mode of the table database to 0644 upon creation.
 // 0644 stands for owner:rw- group:r--, other:r--.
-#define TABLEDATABASE_MODE 0644
+static constexpr int TABLEDATABASE_MODE = 0644;
 
 //
 // This is a callback routine which return the content of secondary key to its
@@ -41,7 +49,7 @@ TableDatabase::TableDatabase(const Path &envPath) try
 
 TableDatabase::~TableDatabase()
 {
-    for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
+    for (auto type : DatabaseNames) {
         mDatabase[type].reset();
         mSecondaryDatabase[type].reset();
     }
@@ -56,7 +64,7 @@ int TableDatabase::open(const Path &dbPath)
     try {
         mDatabaseEnv->txn_begin(NULL, &txn, 0);
 
-        for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
+        for (auto type : DatabaseNames) {
             String databaseName = fileMapName(type);
             String primaryDatabaseName = databaseName + ".primary";
             String secondaryDatabaseName = databaseName + ".secondary";
@@ -82,7 +90,7 @@ int TableDatabase::open(const Path &dbPath)
         if (txn)
             txn->abort();
         // Do cleanup in case of errors.
-        for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
+        for (auto type : DatabaseNames) {
             mDatabase[type].reset();
             mDatabase[type].reset();
         }
@@ -92,7 +100,7 @@ int TableDatabase::open(const Path &dbPath)
 on_error:
     txn->abort();
     // Do cleanup in case of errors.
-    for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
+    for (auto type : DatabaseNames) {
         mDatabase[type].reset();
         mDatabase[type].reset();
     }
@@ -258,7 +266,7 @@ static int TableDatabaseDeleteUnit(DbTxn *txn, Db *database, uint32_t fileId)
 int TableDatabase::DeleteUnitInternal(DbTxn *txn, uint32_t fileId)
 {
     int ret;
-    for (auto type : { Symbols, SymbolNames, Targets, Usrs, Tokens }) {
+    for (auto type : DatabaseNames) {
         ret = TableDatabaseDeleteUnit(txn, mDatabase[type].get(), fileId);
         if (ret)
             break;
@@ -304,7 +312,7 @@ int TableDatabase::deleteUnit(uint32_t fileId)
     DbTxn *txn = NULL;
 
     try {
-        mDatabaseEnv->txn_begin(NULL, &txn, DB_TXN_NOSYNC);
+        mDatabaseEnv->txn_begin(NULL, &txn, 0);
 
         ret = DeleteUnitInternal(txn, fileId);
         if (ret)
@@ -325,22 +333,6 @@ on_error:
     return ret;
 }
 
-template <typename Key, typename Value>
-void TableDatabaseMakeItemList(const FileMap<Key, Value> &map, std::list<std::pair<Blob, Blob> > &list)
-{
-    for (unsigned int i = 0; i < map.count(); i++) {
-        Key key = map.keyAt(i);
-        Value value = map.valueAt(i);
-        Blob keyBlob, valueBlob;
-        Serializer keySerializer = getBlobSerializer(keyBlob);
-        Serializer valueSerializer = getBlobSerializer(valueBlob);
-        keySerializer << key;
-        valueSerializer << value;
-        list.push_back(std::make_pair(keyBlob, valueBlob));
-    }
-}
-
-template <>
 void TableDatabaseMakeItemList(const FileMap<String, Set<Location> > &map, std::list<std::pair<Blob, Blob> > &list)
 {
     for (unsigned int i = 0; i < map.count(); i++) {
@@ -365,7 +357,7 @@ int TableDatabase::updateUnit(uint32_t fileId, const UpdateUnitArgs &args)
     DbTxn *txn = NULL;
 
     try {
-        mDatabaseEnv->txn_begin(NULL, &txn, DB_TXN_NOSYNC);
+        mDatabaseEnv->txn_begin(NULL, &txn, 0);
 
         // Delete entries related to @FileId
         ret = DeleteUnitInternal(txn, fileId);
@@ -418,39 +410,6 @@ on_error:
 //
 // Query database to fetch key:value pair from specified tables
 //
-int TableDatabase::querySymbols(const Location &keyLocation,
-                                std::function<QueryResult(uint32_t fileId, const Location &key, const Symbol &value)> cb)
-{
-    auto process = [this, &keyLocation, &cb](uint32_t fileId, const Blob &, const Blob &value) -> QueryResult {
-        Symbol symbol;
-        Deserializer valueDeserializer = getBlobDeserializer(value);
-        valueDeserializer >> symbol;
-        return cb(fileId, keyLocation, symbol);
-    };
-
-    Blob keyBlob;
-    Serializer keySerializer = getBlobSerializer(keyBlob);
-    keySerializer << keyLocation;
-    int ret = TableDatabaseQuery(NULL, mSecondaryDatabase[Symbols].get(), keyBlob, true, process);
-    return ret;
-}
-int TableDatabase::querySymbols(uint32_t fileId, const Location &keyLocation,
-                                 std::function<QueryResult(uint32_t fileId, const Location &key, const Symbol &value)> cb)
-{
-    auto process = [this, &keyLocation, fileId, &cb](uint32_t, const Blob &, const Blob &value) -> QueryResult {
-        Symbol symbol;
-        Deserializer valueDeserializer = getBlobDeserializer(value);
-        valueDeserializer >> symbol;
-        return cb(fileId, keyLocation, symbol);
-    };
-
-    Blob keyBlob;
-    Serializer keySerializer = getBlobSerializer(keyBlob);
-    keySerializer << keyLocation;
-    int ret = TableDatabaseQuery(NULL, mDatabase[Symbols].get(), fileId, keyBlob, true, process);
-    return ret;
-}
-
 int TableDatabase::queryTargets(const String &keyTarget, bool isKeyPrefix,
                                 std::function<QueryResult(uint32_t fileId, const String &key, const Set<Location> &value)> cb)
 {
@@ -541,38 +500,5 @@ int TableDatabase::queryUsrs(uint32_t fileId, const String &keyUsrs, bool isKeyP
 
     Blob keyBlob(keyUsrs.data(), keyUsrs.size());
     int ret = TableDatabaseQuery(NULL, mDatabase[Usrs].get(), fileId, keyBlob, isKeyPrefix, process);
-    return ret;
-}
-
-int TableDatabase::queryToken(uint32_t keyTokenId,
-                              std::function<QueryResult(uint32_t fileId, uint32_t key, const Token &value)> cb)
-{
-    auto process = [this, keyTokenId, &cb](uint32_t fileId, const Blob &, const Blob &value) -> QueryResult {
-        Token token;
-        Deserializer valueDeserializer = getBlobDeserializer(value);
-        valueDeserializer >> token;
-        return cb(fileId, keyTokenId, token);
-    };
-
-    Blob keyBlob;
-    Serializer keySerializer = getBlobSerializer(keyBlob);
-    keySerializer << keyTokenId;
-    int ret = TableDatabaseQuery(NULL, mSecondaryDatabase[Tokens].get(), keyBlob, true, process);
-    return ret;
-}
-int TableDatabase::queryToken(uint32_t fileId, uint32_t keyTokenId,
-                              std::function<QueryResult(uint32_t fileId, uint32_t key, const Token &value)> cb)
-{
-    auto process = [this, keyTokenId, fileId, &cb](uint32_t, const Blob &, const Blob &value) -> QueryResult {
-        Token token;
-        Deserializer valueDeserializer = getBlobDeserializer(value);
-        valueDeserializer >> token;
-        return cb(fileId, keyTokenId, token);
-    };
-
-    Blob keyBlob;
-    Serializer keySerializer = getBlobSerializer(keyBlob);
-    keySerializer << keyTokenId;
-    int ret = TableDatabaseQuery(NULL, mDatabase[Tokens].get(), fileId, keyBlob, true, process);
     return ret;
 }
