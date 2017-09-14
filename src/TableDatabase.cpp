@@ -37,8 +37,6 @@ static int TableDatabaseGetSecondary(Db *, const Dbt *key, const Dbt *, Dbt *res
 TableDatabase::TableDatabase(const Path &envPath) try
 {
     mDatabaseEnv.reset(new DbEnv(0));
-    mDatabaseEnv->set_flags(DB_TXN_NOSYNC, 1);
-    mDatabaseEnv->set_lk_max_lockers(100000);
     mDatabaseEnv->open(envPath.c_str(), DB_INIT_LOCK|DB_INIT_MPOOL|DB_INIT_TXN|DB_INIT_LOG|DB_RECOVER|DB_CREATE, 0644);
 } catch (DbException &e) {
     TableDatabaseException tableDbException(e.get_errno(), e.what());
@@ -60,8 +58,6 @@ int TableDatabase::open(const Path &dbPath)
     DbTxn *txn = NULL;
 
     try {
-        mDatabaseEnv->txn_begin(NULL, &txn, 0);
-
         for (auto type : DatabaseNames) {
             String databaseName = fileMapName(type);
             String primaryDatabaseName = databaseName + ".primary";
@@ -81,12 +77,8 @@ int TableDatabase::open(const Path &dbPath)
             if (ret)
                 goto on_error;
         }
-
-        txn->commit(0);
     } catch (DbException &e) {
         TableDatabaseException tableDbException(e.get_errno(), e.what());
-        if (txn)
-            txn->abort();
         // Do cleanup in case of errors.
         for (auto type : DatabaseNames) {
             mDatabase[type].reset();
@@ -96,7 +88,6 @@ int TableDatabase::open(const Path &dbPath)
     }
     return 0;
 on_error:
-    txn->abort();
     // Do cleanup in case of errors.
     for (auto type : DatabaseNames) {
         mDatabase[type].reset();
@@ -310,24 +301,16 @@ int TableDatabase::deleteUnit(uint32_t fileId)
     DbTxn *txn = NULL;
 
     try {
-        mDatabaseEnv->txn_begin(NULL, &txn, 0);
-
         ret = DeleteUnitInternal(txn, fileId);
         if (ret)
             goto on_error;
-
-        txn->commit(0);
     } catch (DbException &e) {
         TableDatabaseException tableDbException(e.get_errno(), e.what());
-        if (txn)
-            txn->abort();
         throw tableDbException;
     }
 
     return 0;
 on_error:
-    if (txn)
-        txn->abort();
     return ret;
 }
 
@@ -355,8 +338,6 @@ int TableDatabase::updateUnit(uint32_t fileId, const UpdateUnitArgs &args)
     DbTxn *txn = NULL;
 
     try {
-        mDatabaseEnv->txn_begin(NULL, &txn, 0);
-
         // Delete entries related to @FileId
         ret = DeleteUnitInternal(txn, fileId);
         if (ret)
@@ -389,19 +370,13 @@ int TableDatabase::updateUnit(uint32_t fileId, const UpdateUnitArgs &args)
             if (ret)
                 goto on_error;
         }
-
-        txn->commit(0);
     } catch (DbException &e) {
         TableDatabaseException tableDbException(e.get_errno(), e.what());
-        if (txn)
-            txn->abort();
         throw tableDbException;
     }
 
     return 0;
 on_error:
-    if (txn)
-        txn->abort();
     return ret;
 }
 
